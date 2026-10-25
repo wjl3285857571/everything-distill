@@ -255,6 +255,19 @@ class TestRender(unittest.TestCase):
         self.assertLess(i3, i4)
         self.assertLess(i4, i5)
 
+    def test_stage2_empty_claim_falls_back_to_stage1(self):
+        """第二段只回填 relevance、正文留空时，渲染必须用第一段的条目，不能出空条目。"""
+        s1 = Stage1(source=Source(kind="text", origin="t", title="测试书"),
+                    insights=[Insight(id="I1", claim="一条洞察",
+                                      support="原文片段", locator=Locator(block=1))])
+        hollow = Insight(id="I1", claim="", type="other",
+                         relevance={"level": "high", "note": "跟你有关"})
+        s2 = Stage2(insights=[hollow])
+        md = render(s1, s2)
+        self.assertIn("一条洞察", md)
+        self.assertIn("原文片段", md)
+        self.assertNotIn("**★ **", md)
+
     def test_citations_are_anchored(self):
         s1 = Stage1(source=Source(kind="text", origin="t", title="t"))
         s2 = Stage2(relevant=[{"insight_id": "I1", "why": "w", "basis": [1]}],
@@ -406,10 +419,6 @@ class TestRunner(unittest.TestCase):
             parse_json_loose("完全不是 JSON")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestTranscriptCleaner(unittest.TestCase):
     """[HH:MM:SS] 清洗合并器。"""
 
@@ -477,3 +486,110 @@ class TestTranscriptCleaner(unittest.TestCase):
             for i in range(20))
         r = clean_transcript(cues)
         self.assertIn("压缩比", r["stats"])
+
+
+class TestArxiv(unittest.TestCase):
+    """arXiv 论文接入：ID 识别 + LaTeXML 解析（不联网）。"""
+
+    # 一段最小 LaTeXML 片段，覆盖真实页面里会用到的结构
+    HTML = """<html><body>
+    <dialog><h5>Report GitHub Issue</h5><p>噪声</p></dialog>
+    <div class="ltx_page_content"><article class="ltx_document ltx_authors_1line">
+      <h1 class="ltx_title ltx_title_document">A Paper Title</h1>
+      <div class="ltx_authors"><span class="ltx_personname">Alice</span>
+        <span class="ltx_note">thanks: funded by someone</span></div>
+      <div class="ltx_abstract"><h6 class="ltx_title ltx_title_abstract">Abstract</h6>
+        <p class="ltx_p">We propose a thing that works.</p></div>
+      <section id="S1" class="ltx_section">
+        <h2 class="ltx_title ltx_title_section"><span class="ltx_tag">1 </span>Introduction</h2>
+        <p class="ltx_p">Motivation with math <math alttext="x_{t}"></math> inside.</p>
+      </section>
+      <section id="S3" class="ltx_section">
+        <h2 class="ltx_title ltx_title_section"><span class="ltx_tag">3 </span>Model</h2>
+        <h3 class="ltx_title ltx_title_subsection"><span class="ltx_tag">3.1 </span>Encoder</h3>
+        <p class="ltx_p">Encoder body.</p>
+        <figure class="ltx_table"><figcaption class="ltx_caption">
+          <span class="ltx_tag">Table 1: </span>Results table.</figcaption>
+          <table><tr><td>0.99</td><td>0.01</td></tr></table></figure>
+      </section>
+      <section id="Sb" class="ltx_bibliography">
+        <h2 class="ltx_title ltx_title_bibliography">References</h2>
+        <ul><li class="ltx_bibitem"><span class="ltx_tag">[1] </span>A. Author. A cited paper.</li></ul>
+      </section>
+    </article></div></body></html>"""
+
+    def test_is_arxiv(self):
+        from ed.ingest.arxiv import is_arxiv
+        yes = ["1706.03762", "1706.03762v7",
+               "https://arxiv.org/abs/1706.03762",
+               "https://arxiv.org/pdf/1706.03762v7.pdf",
+               "https://arxiv.org/html/1706.03762v7",
+               "cs/0112017"]
+        no = ["/tmp/paper.pdf", "https://example.com/a", "", "1706.03762 是论文"]
+        for s in yes:
+            self.assertTrue(is_arxiv(s), f"应识别为 arXiv: {s}")
+        for s in no:
+            self.assertFalse(is_arxiv(s), f"不应识别为 arXiv: {s}")
+
+    def test_parse_arxiv_id(self):
+        from ed.ingest.arxiv import parse_arxiv_id
+        cases = {
+            "1706.03762v7": "1706.03762",
+            "https://arxiv.org/abs/1706.03762": "1706.03762",
+            "https://arxiv.org/pdf/1706.03762v7.pdf": "1706.03762",
+            "math.GT/0309136": "math.GT/0309136",
+        }
+        for raw, want in cases.items():
+            self.assertEqual(parse_arxiv_id(raw), want, raw)
+
+    def test_heading_levels_shift_up_one(self):
+        from ed.ingest.arxiv import latexml_to_text
+        t = latexml_to_text(self.HTML)
+        self.assertIn("# 1 Introduction", t)
+        self.assertIn("# 3 Model", t)
+        self.assertIn("## 3.1 Encoder", t)
+        self.assertIn("# References", t)
+
+    def test_abstract_becomes_section(self):
+        from ed.ingest.arxiv import latexml_to_text
+        t = latexml_to_text(self.HTML)
+        self.assertIn("## 摘要", t)
+        self.assertIn("We propose a thing that works.", t)
+        # "Abstract" 字样不该重复出现
+        self.assertNotIn("Abstract\n", t)
+
+    def test_page_noise_is_dropped(self):
+        from ed.ingest.arxiv import latexml_to_text
+        t = latexml_to_text(self.HTML)
+        self.assertNotIn("Report GitHub Issue", t)
+        self.assertNotIn("funded by someone", t)      # 作者脚注
+        self.assertNotIn("A Paper Title", t)          # 大标题已在元数据
+
+    def test_math_keeps_latex_source(self):
+        from ed.ingest.arxiv import latexml_to_text
+        t = latexml_to_text(self.HTML)
+        self.assertIn("$x_{t}$", t)
+
+    def test_table_cells_dropped_caption_kept(self):
+        from ed.ingest.arxiv import latexml_to_text
+        t = latexml_to_text(self.HTML)
+        self.assertIn("Table 1: Results table.", t)
+        self.assertNotIn("0.99", t)
+
+    def test_bibliography_items_become_list(self):
+        from ed.ingest.arxiv import latexml_to_text
+        t = latexml_to_text(self.HTML)
+        self.assertIn("- ", t)
+        self.assertIn("A cited paper.", t)
+
+    def test_block_heading_is_chapter_not_last_subsection(self):
+        """块横跨多个小节时，块头应标章名，而不是最后那个小节。"""
+        text = ("# 3 Model\n\n" + "a " * 100 + "\n\n## 3.1 Encoder\n\n" + "b " * 100
+                + "\n\n## 3.2 Decoder\n\n" + "c " * 100)
+        blocks = build_blocks(text, target_words=5000)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].heading, "3 Model")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

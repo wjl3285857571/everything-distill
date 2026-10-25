@@ -177,6 +177,27 @@ def render(
     name = clean_title(title or src.title) or "这份内容"
     now = time.strftime("%Y-%m-%d %H:%M")
 
+    # 正文洞察始终以第一段为准（它才是完整的那份）。第二段负责的是
+    # 「哪条对他更要紧」，不是「留哪条」——它回的条数不稳定，直接当正文会随机丢内容。
+    # 这里先做一次注入，后面的统计和渲染用的是同一份数据。
+    insights = list(stage1.insights)
+    if stage2 and stage2.insights:
+        rel = {i.id: i.relevance for i in stage2.insights if i.relevance}
+        for ins in insights:
+            if ins.id in rel:
+                ins.relevance = rel[ins.id]
+    if stage2 and stage2.relevant:
+        # 被写进「跟你有关」的条目就是重点，一律标 ★——
+        # 否则正文的 ★ 数量和第四节讲的条数对不上，读者会困惑
+        picked = {r.get("insight_id") for r in stage2.relevant}
+        for ins in insights:
+            if ins.id in picked:
+                ins.relevance = {"level": "high",
+                                 "note": (ins.relevance or {}).get("note", "")
+                                 if isinstance(ins.relevance, dict) else ""}
+    _hi = sum(1 for i in insights
+              if isinstance(i.relevance, dict) and i.relevance.get("level") == "high")
+
     # 章节编号：缺失的章节不占号，避免「一 → 三」的跳号
     has_angles = bool(stage2 and stage2.entry_angles)
     sec = 0
@@ -223,16 +244,11 @@ def render(
         bits = []
         if stage1.stats.get("有效字数"):
             bits.append(f"{stage1.stats['有效字数']:,} 字")
-        _ins_for_count = (stage2.insights if (stage2 and stage2.insights)
-                          else stage1.insights)
-        total_ins = stage1.stats.get("洞察数")
-        shown = len(_ins_for_count)
-        if total_ins and shown and shown < total_ins:
-            bits.append(f"{total_ins} 条洞察中精选 {shown} 条")
-        elif total_ins:
-            bits.append(f"{total_ins} 条洞察")
-        elif shown:
-            bits.append(f"{shown} 条洞察")
+        # 正文渲染的是第一段的全部洞察，所以条数按第一段算；
+        # 第二段的条数只代表「它挑了几条讲」，不是正文有多少条
+        total_ins = len(insights)
+        if total_ins:
+            bits.append(f"{total_ins} 条洞察" + (f"（★ 重点 {_hi} 条）" if _hi else ""))
         if bits:
             L.append(f"*{' ｜ '.join(bits)}*")
             L.append("")
@@ -270,10 +286,27 @@ def render(
             ))
         L.append("")
 
-    insights = stage2.insights if (stage2 and stage2.insights) else stage1.insights
+    # 相关度注入已在函数开头做完，这里只负责排序
+    if any(ins.relevance for ins in insights):
+        rank = {"high": 0, "medium": 1, "low": 2}
+
+        def _rank(ins):
+            rel = ins.relevance or {}
+            level = rel.get("level") if isinstance(rel, dict) else None
+            return rank.get(str(level or ""), 3)
+
+        insights.sort(key=_rank)
     if insights:
         L.append("### 关键洞察")
         L.append("")
+        # 条数多时给一行导航：读者得知道重点在哪、要不要全读
+        if len(insights) >= 40:
+            hi = sum(1 for i in insights
+                     if (i.relevance or {}).get("level") == "high")
+            if hi:
+                L.append(f"*共 {len(insights)} 条，按与你的相关度排序，"
+                         f"其中 ★ 重点 {hi} 条。时间紧就只读 ★。*")
+                L.append("")
         for ins in insights:
             rel = ins.relevance or {}
             level = rel.get("level")

@@ -398,11 +398,14 @@ def build_blocks(text: str, target_words: int = 8000) -> List[Block]:
         if not cur:
             return
         body = "\n\n".join(cur)
+        # 块头用所属一级标题（章）而不是块内最后一个小节：
+        # 一个块常横跨多个小节，标成最后那个小节会让读者误以为整块只讲它。
+        label = top or heading
         blocks.append(Block(
             index=len(blocks) + 1,
             text=body,
-            heading=heading,
-            level=level,
+            heading=label,
+            level=1 if top else level,
             words=effective_words(body)["有效字数"],
         ))
         cur = []
@@ -540,6 +543,11 @@ def load_weibo(url: str) -> Document:
 def load_url(url: str) -> Document:
     """网页/社交帖 → Document。X 帖走镜像 API（免登录），普通网页抠正文。"""
     import urllib.request
+
+    # arXiv 链接走专门的解析器：保留章节层级和公式，比通用网页抠正文干净得多
+    from .arxiv import is_arxiv, load_arxiv
+    if is_arxiv(url):
+        return load_arxiv(url)
 
     def _get(u: str) -> str:
         req = urllib.request.Request(

@@ -127,6 +127,13 @@ def run_stage1(
     串行的话一本书要等 N 倍单批时间；并发后总时长约等于最慢那批。
     """
     system = load_template("stage1_system.md")
+    # 论文有它自己的语义骨架，额外挂一段追问集（不改通用规则）
+    if doc.source.kind == "arxiv":
+        system = system.replace(
+            "\n---\n\n以下是本次要处理的文本块",
+            "\n\n" + load_template("stage1_paper.md")
+            + "\n---\n\n以下是本次要处理的文本块",
+        )
     batches = make_batches(doc, batch_size)
     total_batches = len(batches)
 
@@ -311,6 +318,14 @@ def verify_stage1(stage1: Stage1, doc: Document) -> Dict[str, Any]:
                 missing_support.append({"id": ins.id, "标题": ins.claim[:40],
                                         "原因": "摘录定位不到"})
 
+    # 质量提示（不阻断）：论文里 result 类条目必须带数字，
+    # 没有数字的多半是把定性观察误标成了结果
+    no_number = [
+        {"id": ins.id, "标题": ins.claim[:40]}
+        for ins in stage1.insights
+        if (ins.type or "") == "result" and not re.search(r"\d", ins.claim)
+    ]
+
     return {
         "总数": len(items),
         "定位成功": ok,
@@ -318,5 +333,6 @@ def verify_stage1(stage1: Stage1, doc: Document) -> Dict[str, Any]:
         "无法定位明细": missing_support[:10],
         "归属错误": len(misattributed),
         "归属错误明细": misattributed[:10],
+        "无数值结果": no_number,
         "通过": not missing_support and not misattributed,
     }

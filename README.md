@@ -67,6 +67,7 @@
 | 播客 | 小宇宙 / 喜马拉雅 | 公开接口直取音频（付费内容诚实报付费墙） |
 | 社交帖 | X/Twitter | fxtwitter 公共镜像 API（免登录） |
 | 社交帖 | 微博 | 官方游客 cookie 自动领取 + 移动端 JSON 接口 |
+| 论文 | arXiv（链接或 ID） | 官方 HTML 全文 + 导出 API 元数据，保留章节层级与公式 |
 | 网页 | 任意博客/文章 | HTML 抓取 + 正文清洗 |
 | 本地文件 | epub / pdf / docx / txt / md / srt / vtt / mp3 / mp4 / wav / webm | 直接解析 |
 | 本地文件 | 音视频（任意上面格式） | 直接进云端 ASR，秒级出时间戳逐字稿 |
@@ -188,6 +189,7 @@ tests/                 48 项回归测试
 | 抖音/小红书链接解析 | 1.4 秒 |
 | 27 分钟音频纯转写（Groq 云端） | ≈ 20 秒 |
 | 《穷查理宝典》全书（32.5 万字） | 第一段 ≈ 35 个并行任务，硬校验 100% 通过 |
+| arXiv 论文（5,606 字 → 10 块） | 抓取解析 ≈ 3 秒，第一段 2 批共 ≈ 15 分钟，硬校验 94/94 通过 |
 
 ## 设计决策（为什么这么做）
 
@@ -202,6 +204,54 @@ tests/                 48 项回归测试
 
 **为什么失败要说清原因？**
 「失败了」是废物诊断。每条失败都带 `reason_code`（`ip_blocked` / `needs_login` / `paywalled` / `platform_changed` / `missing_key`...）和对应下一步。用户不该在黑盒前猜。
+
+## 论文模式
+
+arXiv 链接或 ID 直接丢进来：
+
+```bash
+python3 -m ed ingest 1706.03762 --workdir runs/attention
+python3 -m ed ingest https://arxiv.org/abs/1706.03762 --workdir runs/attention
+```
+
+### 取的是哪一份
+
+arXiv 官方会给论文生成 HTML 版（`arxiv.org/html/<id>`），带章节标签。我们抓这一份，而不是下载 PDF 再抽文字：
+
+- **章节层级是真的**：`<section>` / `<h2>` 就是论文的第 1、2、3 章，切块按章断开
+- **公式是 LaTeX 源**：`<math alttext="h_{t}">` 里存着原始公式，保留成 `$h_{t}$`
+- **图表标题保留**：图注里的结论读得到；表格里的数字矩阵丢掉（压成纯文本没有意义）
+- **元数据走官方导出 API**：标题、作者、年份、原始摘要
+
+整条路零 key、零登录、零模型。arXiv 没生成 HTML 的旧论文会明确告诉你「这篇没有 HTML 版，请给我 PDF」，不静默失败。
+
+### 论文专属的追问
+
+论文有自己的骨架，通用追问集不够。论文进来时会额外挂一段追问：
+
+| 记什么 | 为什么 |
+|---|---|
+| 研究问题 | 不是「背景介绍」，是作者认为现有做法哪里不行 |
+| 方法机制 | 输入 → 操作 → 输出，以及关键设计取舍 |
+| 结果（带数字） | 结果类条目的 `claim` 必须出现具体数字 |
+| 消融与对照 | 收益来自哪个组件，不是笼统的「我们更好」 |
+| 局限 | 作者承认的边界；作者没承认但明显没验证的，标注成推断 |
+
+`type` 字段在论文里换成论文语义：`claim` / `method` / `result` / `ablation` / `limitation` / `term` / `question`。
+
+### 边界必须分三态
+
+论文最容易被写错的地方就是边界。硬性要求区分：
+
+1. 作者**明确写了**适用条件 → 照抄那个条件
+2. 作者**只在某设置下验证** → 写「仅在 X 下验证，未讨论 Y」
+3. 作者**完全没提** → 写「作者未说明」
+
+不许因为「看起来应该只对英文有效」就替论文写边界——那是读者的推断，不是论文的结论。
+
+### 摘要不能当结果
+
+论文摘要会把结果说得很漂亮。摘要里的说法在正文找不到对应实验支撑时，这条只能记成 `claim`，不能记成 `result`。程序会拿 `support` 回原文逐字比对，数字对不上整条作废。
 
 ## 已知限制
 
@@ -277,6 +327,7 @@ Every cloud dependency has a free tier, and every link has fallback layers. For 
 | Podcast | Xiaoyuzhou / Ximalaya | Public API, honest paywall errors |
 | Social post | X/Twitter | fxtwitter public mirror API, no login |
 | Social post | Weibo | Auto-fetched guest cookie + mobile JSON API |
+| Paper | arXiv (link or ID) | Official HTML full text + export-API metadata, keeps section structure and formulas |
 | Web page | Any blog/article | HTML fetch + content extraction |
 | Local files | epub / pdf / docx / txt / md / srt / vtt / mp3 / mp4 / wav / webm | Direct parsing |
 | Local media | Any of the above | Straight into cloud ASR, seconds to timestamped transcript |
@@ -343,6 +394,55 @@ This keeps the pipeline model-agnostic: swap models, providers, or agent framewo
 | Douyin/XHS link resolution | 1.4 s |
 | 27-min audio transcription (Groq cloud) | ≈ 20 s |
 | Full book (325k chars) | Stage 1 ≈ 35 parallel tasks, 100% hard-validation pass |
+| arXiv paper (5,606 words → 10 chunks) | Fetch + parse ≈ 3 s; stage 1, 2 batches ≈ 15 min; hard validation 94/94 |
+
+## Paper Mode
+
+Feed it an arXiv link or a bare ID:
+
+```bash
+python3 -m ed ingest 1706.03762 --workdir runs/attention
+python3 -m ed ingest https://arxiv.org/abs/1706.03762 --workdir runs/attention
+```
+
+### Which copy it reads
+
+arXiv generates an HTML edition of each paper (`arxiv.org/html/<id>`) with real section tags. We read that instead of downloading the PDF and scraping text:
+
+- **Section hierarchy is real** — `<section>` / `<h2>` *are* chapters 1, 2, 3, so chunking breaks on chapter boundaries
+- **Formulas stay as LaTeX** — `<math alttext="h_{t}">` carries the original source, kept as `$h_{t}$`
+- **Figure and table captions are kept** — the conclusion in a caption is readable; the numeric matrix inside a table is dropped (flattening it to text means nothing)
+- **Metadata comes from the official export API** — title, authors, year, original abstract
+
+The whole path needs no key, no login, no model. Older papers without an HTML edition get an explicit "this paper has no HTML version, give me the PDF" instead of a silent failure.
+
+### Paper-specific interrogation
+
+A paper has its own skeleton, and the generic checklist is not enough. Papers get an extra prompt section:
+
+| Record | Why |
+|---|---|
+| Research question | Not "background" — where the authors think existing practice fails |
+| Method mechanism | Input → operation → output, plus the key design trade-off |
+| Results with numbers | A `result` claim must carry a concrete number |
+| Ablations and controls | Which component the gain comes from, not a vague "ours is better" |
+| Limitations | Boundaries the authors admit; unverified ones get marked as inference |
+
+`type` switches to paper semantics: `claim` / `method` / `result` / `ablation` / `limitation` / `term` / `question`.
+
+### Boundaries must be three-state
+
+This is where paper notes go wrong most often. Hard requirement:
+
+1. The authors **state** a condition → copy that condition
+2. The authors **only validate under one setting** → "validated only under X, Y not discussed"
+3. The authors **say nothing** → "not stated by the authors"
+
+Never write a boundary because it "obviously only works for English" — that is the reader's inference, not the paper's conclusion.
+
+### An abstract is not a result
+
+Abstracts make everything sound great. If an abstract claim has no matching experiment in the body, it can only be recorded as a `claim`, never a `result`. Every `support` excerpt is compared character-by-character against the source; a mismatched number voids the entry.
 
 ## Known Limitations
 

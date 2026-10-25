@@ -56,9 +56,14 @@ def load_context(args) -> Context:
 
 
 def cmd_ingest(args) -> int:
-    if args.input.startswith(("http://", "https://")):
+    raw = args.input
+    from .ingest.arxiv import is_arxiv
+    if is_arxiv(raw):
+        from .ingest.arxiv import load_arxiv
+        doc = load_arxiv(raw)
+    elif raw.startswith(("http://", "https://")):
         from .ingest.base import load_url
-        doc = load_url(args.input)
+        doc = load_url(raw)
     else:
         doc = load(args.input)
     workspace.save_document(args.workdir, doc)
@@ -93,6 +98,10 @@ def cmd_stage1(args) -> int:
         print("  ↷ 归属错误（已自动修正）：")
         for m in v["归属错误明细"][:5]:
             print(f"     {m['id']} 块{m['声称块']} → 块{m['实际块']}")
+    if v.get("无数值结果"):
+        print(f"  ⚠ 标成结果却没数字（{len(v['无数值结果'])} 条，建议改标 claim）：")
+        for m in v["无数值结果"][:5]:
+            print(f"     {m['id']} {m['标题'][:40]}")
     return 0 if v["通过"] else 2
 
 
