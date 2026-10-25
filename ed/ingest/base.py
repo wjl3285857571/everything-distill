@@ -296,6 +296,52 @@ def read_pdf(path: str) -> Tuple[str, bool]:
     return txt, scanned
 
 
+# PDF 抽出来的文本没有标题标记。论文的章节行是独立一行的
+# 「Introduction」「3 Model Architecture」这类，认出来才能按章切块。
+_PAPER_SECTIONS = {
+    "abstract", "introduction", "related work", "background", "preliminaries",
+    "method", "methods", "methodology", "approach", "model", "model architecture",
+    "architecture", "experiments", "experimental setup", "experimental results",
+    "evaluation", "results", "analysis", "ablation", "ablation study",
+    "discussion", "limitations", "conclusion", "conclusions", "future work",
+    "references", "appendix", "acknowledgments", "acknowledgements",
+}
+_PAPER_NUMBERED = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){0,2})\s+([A-Z][^\n]{1,60})$")
+
+
+def promote_pdf_headings(text: str) -> Tuple[str, bool]:
+    """把 PDF 里的论文章节行提升成 markdown 标题。
+
+    返回 (文本, 是否认成论文)。认不出来就原样返回——宁可切得粗，
+    也不能把正文行误判成标题、把内容切碎。
+    """
+    lines = text.split("\n")
+    cand: Dict[int, int] = {}
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if not s or len(s) > 60:
+            continue
+        level = None
+        if s.lower().rstrip(":") in _PAPER_SECTIONS:
+            level = 1
+        else:
+            m = _PAPER_NUMBERED.match(s)
+            if m and not s.endswith((".", ",", ";", ":")):
+                level = m.group(1).count(".") + 1
+        if level:
+            cand[i] = level
+    if len(cand) < 3:
+        return text, False
+    out = []
+    for i, ln in enumerate(lines):
+        lvl = cand.get(i)
+        if lvl:
+            out.append("#" * min(lvl, 4) + " " + ln.strip().rstrip(":"))
+        else:
+            out.append(ln)
+    return "\n".join(out), True
+
+
 def read_subtitle(path: str) -> str:
     """读 srt/vtt 字幕，转成带时间戳的纯文本。"""
     raw = read_text_file(path)
@@ -609,6 +655,11 @@ def load(path: str) -> Document:
             raise ValueError(
                 "这个 PDF 抽不出文字层（扫描件）。请先做 OCR 再给我。"
             )
+        # 论文 PDF 的章节行没有标记，认出来才能按章切块
+        text, is_paper = promote_pdf_headings(text)
+        if is_paper:
+            src.meta["paper"] = True
+            src.kind = "paper"
     elif ext == ".docx":
         text = read_docx(path)
         src = Source(kind="docx", origin=path, title=os.path.basename(path))
@@ -632,7 +683,9 @@ def load(path: str) -> Document:
         raise ValueError(f"暂不支持的格式：{ext}")
 
     text = re.sub(r"\n{4,}", "\n\n\n", text).strip()
-    blocks = build_blocks(text)
+    # 论文一般 5000-8000 字，按书的 8000 阈值切就整篇一块了
+    paper = bool(src.meta.get("paper")) or src.kind == "arxiv"
+    blocks = build_blocks(text, target_words=3000 if paper else 8000)
     stats = effective_words(text)
     stats["块数"] = len(blocks)
     stats["标题数"] = len(HEADING_RE.findall(text))

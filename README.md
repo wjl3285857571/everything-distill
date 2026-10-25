@@ -225,6 +225,19 @@ arXiv 官方会给论文生成 HTML 版（`arxiv.org/html/<id>`），带章节�
 
 整条路零 key、零登录、零模型。arXiv 没生成 HTML 的旧论文会明确告诉你「这篇没有 HTML 版，请给我 PDF」，不静默失败。
 
+### 本地 PDF 也能直接进
+
+期刊下载的、别人发你的 PDF，直接 `ingest`：
+
+```bash
+python3 -m ed ingest ~/Downloads/paper.pdf --workdir runs/some-paper
+```
+
+PDF 抽出的文本没有标题标记，所以会先认章节行（`Introduction`、`3 Model Architecture`、`3.1 Encoder` 这类独立短行），
+认出来就提升成标题、按章切块；认不出就原样处理，不乱动正文。
+
+**代价要说清**：公式在 PDF 文本层里是符号碎片，表格会散成数字流——这部分质量不如 arXiv HTML 版。能用 HTML 版就用 HTML 版。
+
 ### 论文专属的追问
 
 论文有自己的骨架，通用追问集不够。论文进来时会额外挂一段追问：
@@ -415,6 +428,18 @@ arXiv generates an HTML edition of each paper (`arxiv.org/html/<id>`) with real 
 - **Metadata comes from the official export API** — title, authors, year, original abstract
 
 The whole path needs no key, no login, no model. Older papers without an HTML edition get an explicit "this paper has no HTML version, give me the PDF" instead of a silent failure.
+
+### Local PDFs work too
+
+A PDF from a journal or a colleague goes straight in:
+
+```bash
+python3 -m ed ingest ~/Downloads/paper.pdf --workdir runs/some-paper
+```
+
+PDF text has no heading markup, so section lines are recognised first (`Introduction`, `3 Model Architecture`, `3.1 Encoder` — standalone short lines). When found they become headings and chunking breaks per chapter; when not, the text is left untouched.
+
+**The honest trade-off**: formulas in a PDF text layer come out as symbol fragments and tables dissolve into number streams — that part is worse than the arXiv HTML edition. Prefer HTML when it exists.
 
 ### Paper-specific interrogation
 

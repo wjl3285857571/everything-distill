@@ -128,7 +128,7 @@ def run_stage1(
     """
     system = load_template("stage1_system.md")
     # 论文有它自己的语义骨架，额外挂一段追问集（不改通用规则）
-    if doc.source.kind == "arxiv":
+    if doc.source.kind in ("arxiv", "paper"):
         system = system.replace(
             "\n---\n\n以下是本次要处理的文本块",
             "\n\n" + load_template("stage1_paper.md")

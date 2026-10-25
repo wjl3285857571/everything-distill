@@ -71,6 +71,36 @@ class TestIngest(unittest.TestCase):
         blocks = build_blocks(text, target_words=8000)
         self.assertLess(len(blocks), 30)
 
+    def test_pdf_paper_headings_promoted(self):
+        """论文 PDF 的章节行没有标记，要认出来提升成标题，切块才能按章断开。"""
+        from ed.ingest.base import promote_pdf_headings
+        text = ("Abstract\n\nSome text.\n\nIntroduction\n\nMore text.\n\n"
+                "3 Model Architecture\n\nDetails here.\n\n3.1 Encoder\n\nEncoder.\n\n"
+                "Conclusion\n\nDone.")
+        out, is_paper = promote_pdf_headings(text)
+        self.assertTrue(is_paper)
+        self.assertIn("# Abstract", out)
+        self.assertIn("# Introduction", out)
+        self.assertIn("# 3 Model Architecture", out)
+        self.assertIn("## 3.1 Encoder", out)
+        self.assertIn("# Conclusion", out)
+
+    def test_pdf_non_paper_untouched(self):
+        """不是论文就原样返回，不能把正文行误判成标题。"""
+        from ed.ingest.base import promote_pdf_headings
+        text = "第一章 开始\n\n这是小说正文。\n\n第二章 继续\n\n又是正文。"
+        out, is_paper = promote_pdf_headings(text)
+        self.assertFalse(is_paper)
+        self.assertEqual(out, text)
+
+    def test_pdf_needs_at_least_three_sections(self):
+        """只命中一两个章节词时不动手，避免误伤。"""
+        from ed.ingest.base import promote_pdf_headings
+        text = "Introduction\n\n正文。\n\n随便一段话。"
+        out, is_paper = promote_pdf_headings(text)
+        self.assertFalse(is_paper)
+        self.assertEqual(out, text)
+
     def test_build_blocks_no_cross_h1(self):
         text = "# 第一章\n\n" + "甲。" * 500 + "\n\n# 第二章\n\n" + "乙。" * 500
         blocks = build_blocks(text, target_words=200)
