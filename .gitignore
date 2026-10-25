@@ -1,0 +1,11 @@
+# keys / 环境
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+# 运行产物
+runs/
+# macOS
+.DS_Store

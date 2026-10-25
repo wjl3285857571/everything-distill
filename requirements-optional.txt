@@ -1,0 +1,12 @@
+# 可选依赖 —— 核心管线只用标准库，这些是「增强功能」需要的。
+
+# 本地语音转写（视频/音频 → 逐字稿的兜底链路）
+# 装完还需要下载模型：首次转写时自动下（small 模型约 500MB）
+faster-whisper>=1.0
+
+# 备选：阿里的 SenseVoice，中文识别通常更准，CPU 上也快
+# funasr>=1.0
+# modelscope>=1.13
+
+# YouTube 字幕直抓（Hermes 自带 youtube-content skill 时不需要）
+# youtube-transcript-api>=0.6
