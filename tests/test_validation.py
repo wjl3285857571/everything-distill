@@ -866,6 +866,33 @@ class TestMediaRouting(unittest.TestCase):
         self.assertIn("世界", doc.text)
 
 
+class TestYouTubeFallbackOrder(unittest.TestCase):
+    def test_invidious_is_last(self):
+        from ed.ingest import video as v
+        calls = []
+
+        def mk(name, ret):
+            def f(*a, **k):
+                calls.append(name)
+                return ret
+            return f
+
+        fail = {"ok": False, "reason": "x"}
+        with patch("ed.ingest.supadata.fetch_transcript_supadata",
+                   mk("supadata", fail)), \
+             patch.object(v, "fetch_subtitle", mk("yt_sub", fail)), \
+             patch.object(v, "download_audio", mk("yt_audio", fail)), \
+             patch("ed.ingest.invidious.fetch_subtitle_invidious",
+                   mk("inv_sub", fail)), \
+             patch("ed.ingest.invidious.download_audio_invidious",
+                   mk("inv_audio", fail)):
+            r = v.to_transcript("https://youtu.be/abcdefghijk")
+        self.assertEqual(calls,
+                         ["supadata", "yt_sub", "yt_audio",
+                          "inv_sub", "inv_audio"])
+        self.assertFalse(r["ok"])
+
+
 class TestRunnerFactory(unittest.TestCase):
     def test_file_runner_takes_path_kwarg(self):
         from ed.runner import FileRunner, default_runner

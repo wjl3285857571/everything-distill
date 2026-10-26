@@ -49,9 +49,10 @@
 
 ```
 ① Supadata 字幕（秒级，免费 100 积分/月）
-② yt-dlp 直连下载音频 → Groq 转写（免费 2000 请求/天）
-③ Invidious 公共实例代理（慢，但 IP 被拦时永不失效）
-④ 明确报错 + 给出下一步（换 IP / 手动粘贴），绝不假装成功
+② yt-dlp 字幕（本机直连，有字幕就不下载）
+③ yt-dlp 音频 → Groq 转写（免费 2000 请求/天）
+④ Invidious 公共实例代理字幕/音频（最后兜底，最慢）
+⑤ 明确报错 + 给出下一步（换 IP / 手动粘贴），绝不假装成功
 ```
 
 ### 5. 不绑定 Hermes
@@ -72,7 +73,7 @@ python3 -m ed run 书.epub --runner openai --base-url https://api.deepseek.com/v
 | 类型 | 平台/格式 | 链路要点 |
 |---|---|---|
 | 视频 | B 站 | yt-dlp 直连，字幕优先 |
-| 视频 | YouTube | Supadata → yt-dlp → Invidious 三层降级 |
+| 视频 | YouTube | Supadata → yt-dlp 字幕 → yt-dlp 音频/Groq → Invidious（最后） |
 | 视频 | 抖音 | 官方游客 ttwid 接口 + 分享页直链解析（免登录） |
 | 视频/图文 | 小红书 | 页面 `__INITIAL_STATE__` 解析；视频转逐字稿，图文的标题/正文/标签直接进蒸馏（纯图片无文字时明确报错） |
 | 播客 | 小宇宙 / 喜马拉雅 | 公开接口直取音频（付费内容诚实报付费墙） |
@@ -446,7 +447,7 @@ Every cloud dependency has a free tier, and every link has fallback layers. For 
 | Type | Platform | Notes |
 |---|---|---|
 | Video | Bilibili | yt-dlp direct, subtitles first |
-| Video | YouTube | Supadata → yt-dlp → Invidious, three-layer fallback |
+| Video | YouTube | Supadata → yt-dlp subtitles → yt-dlp audio/Groq → Invidious (last resort) |
 | Video | Douyin (TikTok CN) | Official guest ttwid + share-page direct link, no login |
 | Video/Post | Xiaohongshu | `__INITIAL_STATE__` parsing; videos become transcripts, image-note title/body/tags go straight into distillation (pure-image notes fail explicitly) |
 | Podcast | Xiaoyuzhou / Ximalaya | Public API, honest paywall errors |

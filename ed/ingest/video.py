@@ -668,18 +668,10 @@ def to_transcript(url: str, prefer: str = "auto",
             return {"ok": True, "text": r["text"], "via": "subtitle",
                     "attempts": attempts, "platform": platform_of(url)}
 
-        # YouTube 专属兜底：出口 IP 被 bot 检测拦时，yt-dlp 全家都会挂。
-        # 走 Invidious 公共实例（用实例服务器的 IP 拉数据），先试字幕。
-        # （Level 2 的 Groq 音频转写在下方 audio 分支，IP 通时 1+分钟出稿）
-        if is_yt:
-            from .invidious import fetch_subtitle_invidious
-            r2 = fetch_subtitle_invidious(url)
-            attempts.append({"步骤": "Invidious 字幕", "成功": r2.get("ok", False),
-                             "细节": r2.get("reason") or r2.get("instance", "")})
-            if r2.get("ok"):
-                return {"ok": True, "text": r2["text"], "via": "subtitle-invidious",
-                        "attempts": attempts, "platform": platform_of(url)}
+        # 注意：Invidious 放到最后。它要挨个探测公共实例，通常最慢，
+        # 只在 Supadata、yt-dlp 字幕、yt-dlp 音频全部失败后才用。
 
+    last: Dict[str, Any] = {}
     if prefer in ("audio", "auto"):
         with tempfile.TemporaryDirectory() as td:
             d = download_audio(url, td, timeout=timeout)
@@ -705,14 +697,6 @@ def to_transcript(url: str, prefer: str = "auto",
                 if d4.get("ok"):
                     d, got_audio = d4, True
 
-            if not got_audio and is_yt:
-                # Invidious 音频兜底：实例代理流（local=true），绕开本机 IP 被拦
-                from .invidious import download_audio_invidious
-                d2 = download_audio_invidious(url, td)
-                attempts.append({"步骤": "Invidious 音频", "成功": d2.get("ok", False),
-                                 "细节": d2.get("reason") or d2.get("instance", "")})
-                if d2.get("ok"):
-                    d, got_audio = d2, True
             if got_audio:
                 r = transcribe(d["path"], model=asr_model, language=language,
                                engine=asr_engine)
@@ -736,7 +720,50 @@ def to_transcript(url: str, prefer: str = "auto",
                 last = r
             else:
                 last = d
-        # 失败路径也要带上 platform —— 诊断信息里平台比什么都重要
+
+    # ---- Invidious：最慢的兜底，放最后 ----
+    # 出口 IP 被 bot 检测拦时，yt-dlp 全家都会挂；这时让公共实例用
+    # 实例服务器的 IP 去拉字幕/音频。实例本身不稳定，所以只在前面全失败后才试。
+    if is_yt and prefer in ("subtitle", "auto"):
+        from .invidious import fetch_subtitle_invidious
+        r2 = fetch_subtitle_invidious(url)
+        attempts.append({"步骤": "Invidious 字幕", "成功": r2.get("ok", False),
+                         "细节": r2.get("reason") or r2.get("instance", "")})
+        if r2.get("ok"):
+            return {"ok": True, "text": r2["text"], "via": "subtitle-invidious",
+                    "attempts": attempts, "platform": platform_of(url)}
+        last = last or r2
+
+    if is_yt and prefer in ("audio", "auto"):
+        with tempfile.TemporaryDirectory() as td:
+            from .invidious import download_audio_invidious
+            d2 = download_audio_invidious(url, td)
+            attempts.append({"步骤": "Invidious 音频", "成功": d2.get("ok", False),
+                             "细节": d2.get("reason") or d2.get("instance", "")})
+            if d2.get("ok"):
+                r = transcribe(d2["path"], model=asr_model, language=language,
+                               engine=asr_engine)
+                attempts.append({"步骤": "本地转写", "成功": r.get("ok", False),
+                                 "细节": (r.get("reason") or r.get("asr", ""))
+                                 + (f"/{r.get('model','')}" if r.get("ok") else "")})
+                if r.get("ok"):
+                    from .transcript import merge_to_lines, format_lines
+                    segs = r.get("segments")
+                    if segs:
+                        lines = merge_to_lines([(float(a), float(a) + 3.0, t)
+                                                for a, t in segs])
+                        text = format_lines(lines)
+                    else:
+                        c = clean_transcript(r.get("raw_text") or r.get("text", ""))
+                        text = c.get("text", r.get("text", ""))
+                    return {"ok": True, "text": text, "via": "asr",
+                            "asr_model": r.get("model", ""),
+                            "attempts": attempts, "platform": platform_of(url)}
+                last = r
+            elif not last:
+                last = d2
+
+    if last:
         out = {"ok": False, **last, "attempts": attempts}
         # 平台必须按**原始链接**判断，不能用本地路径
         out["platform"] = platform_of(url)
