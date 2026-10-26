@@ -27,6 +27,7 @@
 汇合点都在 to_transcript()：平台差异被隔离在「链接→逐字稿」这一层。
 """
 
+import html
 import json
 import os
 import re
@@ -50,6 +51,7 @@ PLATFORM_HINTS = [
 ]
 
 from .transcript import clean_transcript  # noqa: E402
+from ..config import get_all_env  # noqa: E402
 
 REASONS = {
     "ip_blocked": (
@@ -194,10 +196,12 @@ def fetch_subtitle(url: str, lang: Optional[str] = None,
                     continue
                 files = [f for f in os.listdir(td) if f.endswith(".vtt")]
                 if files:
-                    text = vtt_to_text(os.path.join(td, files[0]))
+                    # 用带时间轴的版本：字幕本来就有时间信息，丢掉等于
+                    # 把「每条观点可回溯到视频时刻」这条承诺作废。
+                    text = vtt_to_timed_text(os.path.join(td, files[0]))
                     if text.strip():
                         return {"ok": True, "text": text, "lang": lg,
-                                "source": "subtitle"}
+                                "source": "subtitle", "timed": True}
     probe = list_subtitles(url)
     if not probe.get("ok"):
         return probe
@@ -227,6 +231,56 @@ def vtt_to_text(path: str) -> str:
             if len(seen_recent) > 8:
                 seen_recent.pop(0)
             out.append(clean)
+    return "\n".join(out)
+
+
+_CUE_START = re.compile(
+    r"(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->")
+
+
+def vtt_to_timed_text(path: str) -> str:
+    """WebVTT → `[HH:MM:SS] 文本`，保留每条 cue 的起始时间。
+
+    和 `vtt_to_text` 的区别只在「要不要时间轴」。给蒸馏用的逐字稿必须
+    带时间：否则「每条观点能跳回原视频」这个能力在字幕路径上就是空的。
+    """
+    out: List[str] = []
+    seen_recent: List[str] = []
+    pending: List[str] = []
+    state = {"ts": ""}
+
+    def flush() -> None:
+        text = " ".join(pending).strip()
+        pending.clear()
+        if not state["ts"] or not text:
+            return
+        text = re.sub(r"<[^>]+>", "", text)
+        text = html.unescape(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return
+        if seen_recent and text == seen_recent[-1]:
+            return
+        seen_recent.append(text)
+        if len(seen_recent) > 8:
+            seen_recent.pop(0)
+        out.append(f"[{state['ts']}] {text}")
+
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.strip()
+            m = _CUE_START.match(line)
+            if m:
+                flush()
+                h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                state["ts"] = f"{h:02d}:{mi:02d}:{s:02d}"
+                continue
+            if (not line or line == "WEBVTT" or line.isdigit()
+                    or line.startswith(("NOTE", "Kind:", "Language:"))):
+                continue
+            if state["ts"]:
+                pending.append(line)
+    flush()
     return "\n".join(out)
 
 
@@ -356,20 +410,12 @@ def _transcribe_groq(audio_path: str, model: str,
 
 
 def _groq_keys() -> List[str]:
-    """全部 Groq key（GROQ_API_KEY, GROQ_API_KEY2..9 + 环境变量），429 时轮换。"""
-    keys: List[str] = []
-    env_file = os.path.expanduser("~/Projects/everything-distill/.env")
-    if os.path.exists(env_file):
-        for line in open(env_file, encoding="utf-8"):
-            line = line.strip()
-            if line.startswith("GROQ_API_KEY"):
-                v = line.split("=", 1)[1].strip().strip('"').strip("'")
-                if v and v not in keys:
-                    keys.append(v)
-    ev = os.environ.get("GROQ_API_KEY")
-    if ev and ev not in keys:
-        keys.append(ev)
-    return keys
+    """全部 Groq key（GROQ_API_KEY, GROQ_API_KEY2..9 + 环境变量），429 时轮换。
+
+    路径交给 ed.config：项目根目录 → 当前目录 → 旧路径 → 环境变量。
+    以前写死 ~/Projects/everything-distill/.env，换个目录装就找不到 key。
+    """
+    return get_all_env("GROQ_API_KEY")
 
 
 def _groq_key() -> Optional[str]:
@@ -503,10 +549,11 @@ def _transcribe_funasr(audio_path: str) -> Dict[str, Any]:
 
 
 def _fmt(sec: float) -> str:
+    """统一成 HH:MM:SS —— 下游清洗器、视觉线索检测都按三段式解析。"""
     sec = float(sec)
     h, rem = divmod(int(sec), 3600)
     m, s = divmod(rem, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 # ---------------------------------------------------------------- 主入口
@@ -524,12 +571,16 @@ def _is_podcast(url: str) -> bool:
     return bool(re.search(r"xiaoyuzhoufm\.com|xima\.tv|ximalaya\.com", url))
 
 
-def to_transcript(url: str, prefer: str = "subtitle",
+def to_transcript(url: str, prefer: str = "auto",
                  asr_model: str = "whisper-large-v3-turbo",
                  language: Optional[str] = None,
                  timeout: int = 900,
                  asr_engine: str = "auto") -> Dict[str, Any]:
-    """把视频链接变成逐字稿。prefer: subtitle | audio | auto"""
+    """把视频链接变成逐字稿。prefer: subtitle | audio | auto
+
+    默认 auto：先试字幕，拿不到再走音频 + ASR。和命令行的默认行为一致——
+    以前这里默认 subtitle，导致「命令行能降级、Python 调用不降级」。
+    """
     attempts: List[Dict[str, Any]] = []
     is_yt = bool(re.search(r"youtube\.com|youtu\.be", url))
 

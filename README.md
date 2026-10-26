@@ -41,9 +41,10 @@
 |---|---|
 | 摘录真实性 | 每条洞察必须附原文逐字摘录，程序回原文做归一化比对，对不上整条作废 |
 | 归属正确性 | 摘录定位不到声明的块时，按摘录在原文中的真实位置重算 |
-| 回执一致性 | 每批的「回执条数」必须与实际解析条目数相等 |
-| 关联挂依据 | 「跟你有关」的每一条都必须挂依据编号，无依据的关联 = 失败（这是防拍马屁的机制） |
-| 时间戳可回溯 | 视频转录稿统一为 `[HH:MM:SS]` 格式，每条观点可跳回原视频对应时刻 |
+| 回执一致性 | 每块的回执条数必须等于实际解析到的条目数；缺回执、数量不符、批次失败都算未完成 |
+| 关联挂依据 | 「跟你有关」的每条都挂依据编号，且引文要回记忆文件 / 会话 / 原文核对，对不上不通过 |
+| 失败不交付 | 校验没过时默认不生成文档；要强行生成得显式 `--allow-failed`，文档顶部会带警告 |
+| 时间戳可回溯 | 字幕、ASR、JSON 逐字稿统一成 `[HH:MM:SS]`，每条观点可跳回原视频对应时刻 |
 
 ### 4. 免费层优先，全程可降级
 
@@ -95,6 +96,9 @@ cp .env.example .env
 # GROQ_API_KEY      → https://console.groq.com/keys （免费 2000 请求/天）
 ```
 
+> `.env` 放**项目根目录**就行，代码按「项目根目录 → 当前目录 → 环境变量」查找，
+> 不再写死某个绝对路径。也可以用 `ED_ENV_FILE=/path/to/.env` 显式指定。
+
 > 没有 key 也能跑文本蒸馏（书/文档/网页），key 只影响视频音频链路。
 > key 缺失时会得到明确的 `missing_key` 诊断和注册指引，绝不会静默失败。
 
@@ -137,6 +141,27 @@ python3 -m ed metadata "https://youtu.be/xxxx"        # 标题/作者/章节
 python3 -m ed frames "https://youtu.be/xxxx" --at 00:12:30 --scene   # 局部抽帧
 ```
 
+### 校验没过时会怎样
+
+`collect` / `stage1` / `stage2` 只要有一项没通过（缺回执、条数不符、批次失败、
+依据引文对不上来源），退出码就是 2；`render` 默认拒绝生成文档。
+
+确实想先看个大概，可以显式放行：
+
+```bash
+python3 -m ed render --workdir runs/书名 --out draft.md --allow-failed
+```
+
+生成的文档顶部会带一条「校验未通过」的警告，不会伪装成正常成品。
+
+### 抽帧默认不读浏览器 Cookie
+
+`frames` 默认只用公开链路。需要登录态时才显式开：
+
+```bash
+python3 -m ed frames "https://youtu.be/xxxx" --at 00:12:30 --cookies
+```
+
 ## 编排模式（谁来调模型）
 
 `ed` 本身**不调用任何 LLM**——它负责所有确定性环节（解析、切块、prompt 生成、校验、渲染），把「调模型」留给宿主：
@@ -154,6 +179,7 @@ ed/
   __main__.py          CLI 入口
   cli.py               命令定义（transcript/ingest/plan/collect/render/...）
   schema.py            数据模型（Insight / Stage1 / Stage2 / Basis）
+  config.py            项目路径与 .env 查找
   workspace.py         工作区读写
   runner.py            模型调用抽象（宿主注入）
   orchestrate.py       编排（批次生成 / 结果校验合并）
@@ -177,10 +203,13 @@ ed/
   verify/
     skill_meta.py      产物元信息校验
 templates/             第一段/第二段的 prompt 模板
-tests/                 48 项回归测试
+tests/                 82 项回归测试
 ```
 
 ## 实测性能（Apple M5）
+
+> 下表是**加严校验之前**的历史实测。校验现在会额外卡回执数量、批次失败和依据引文，
+> 旧数字没有重跑，不应直接当作当前版本的通过率或耗时承诺。
 
 | 场景 | 耗时 |
 |---|---|
@@ -387,6 +416,13 @@ python3 -m ed ingest book.epub --workdir runs/book
 python3 -m ed plan --workdir runs/book
 # ... same as above
 ```
+
+### When validation fails
+
+`collect` / `stage1` / `stage2` exit with code 2 if any batch is unfinished, a receipt
+count doesn't match the parsed entries, or a basis quote can't be found in its source.
+`render` refuses to write a document by default; pass `--allow-failed` to produce a
+draft with a visible warning at the top instead of a normal-looking deliverable.
 
 ## Orchestration
 

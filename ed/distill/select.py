@@ -90,10 +90,24 @@ def select(stage1: Stage1, max_total: int = 200,
     if total_before <= max_total:
         # 未超上限也要按块排序，保证两条路径的输出行为一致
         items.sort(key=lambda i: (i.locator.block or 10**6))
+        per_block: Dict[int, int] = {}
+        for i in items:
+            b = i.locator.block or 0
+            per_block[b] = per_block.get(b, 0) + 1
         return {
             "insights": items,
             "dropped": 0,
             "报告": {"原始": total_before, "保留": total_before,
+                     "丢弃": 0,
+                     "上限": max_total,
+                     "策略": "未超上限，全部保留",
+                     "块数": len(per_block),
+                     "每块保留": {
+                         "最少": min(per_block.values()) if per_block else 0,
+                         "最多": max(per_block.values()) if per_block else 0,
+                         "覆盖块数": len(per_block),
+                     },
+                     "类型分布": _count_types(items),
                      "说明": "条目数未超上限，全部保留"},
         }
 

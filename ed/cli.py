@@ -83,11 +83,14 @@ def cmd_stage1(args) -> int:
         doc, runner, batch_size=args.batch_size, workers=args.workers,
         progress=lambda m: print("  " + m, flush=True),
     )
-    v = verify_stage1(stage1, doc)
-    workspace.save_stage1(args.workdir, stage1, {**report, "verify": v})
+    v = verify_stage1(stage1, doc, report)
+    passed = bool(report.get("通过", True)) and v["通过"]
+    workspace.save_stage1(args.workdir, stage1, {**report, "verify": v, "通过": passed})
     print(f"\n洞察 {len(stage1.insights)} ｜ 反例 {len(stage1.counter_examples)} "
           f"｜ 术语 {len(stage1.glossary)}")
     print(f"回执缺失 {report['缺失回执总数']} ｜ "
+          f"数量不符 {report.get('数量不符总数', 0)} ｜ "
+          f"失败批次 {report.get('失败批次数', 0)} ｜ "
           f"摘录定位 {v['定位成功']}/{v['总数']} ｜ "
           f"归属错误 {v['归属错误']}")
     if v["无法定位明细"]:
@@ -102,16 +105,17 @@ def cmd_stage1(args) -> int:
         print(f"  ⚠ 标成结果却没数字（{len(v['无数值结果'])} 条，建议改标 claim）：")
         for m in v["无数值结果"][:5]:
             print(f"     {m['id']} {m['标题'][:40]}")
-    return 0 if v["通过"] else 2
+    return 0 if passed else 2
 
 
 def cmd_stage2(args) -> int:
     stage1 = workspace.load_stage1(args.workdir)
+    doc = workspace.load_document(args.workdir)
     ctx = load_context(args)
     runner = make_runner(args)
     print(f"第二段：处境 {ctx.summary()}")
     stage2 = run_stage2(stage1, ctx, runner)
-    v = verify_stage2(stage2)
+    v = verify_stage2(stage2, ctx=ctx, stage1=stage1, doc=doc)
     workspace.save_stage2(args.workdir, stage2)
     print(f"关联 {len(stage2.relevant)} ｜ 依据 {len(stage2.basis)} ｜ "
           f"下一步 {len(stage2.next_actions)}")
@@ -123,9 +127,50 @@ def cmd_stage2(args) -> int:
                 print(f"       {d['insight_id']} {d['why']}")
         if v["悬空引用"]:
             print(f"     {v['悬空引用']} 处引用指向不存在的依据")
+        if v.get("引文无法核对"):
+            print(f"     {len(v['引文无法核对'])} 条依据引文在来源里找不到")
+            for d in v["引文无法核对"][:3]:
+                print(f"       依据 {d['id']}（{d['kind']}）— {d['原因']}")
+        if v.get("洞察不存在"):
+            print(f"     {len(v['洞察不存在'])} 条关联指向不存在的洞察")
+        if v.get("依据重复编号"):
+            print(f"     依据编号重复：{v['依据重复编号']}")
     else:
         print("  ✓ 每条关联都有依据")
     return 0 if v["通过"] else 2
+
+
+def _workdir_failures(workdir: str, mem_dir: str) -> List[str]:
+    """汇总工作区里已知的校验失败，供 render / run 决定要不要交付。"""
+    out: List[str] = []
+    rp = os.path.join(workdir, "stage1_report.json")
+    if os.path.exists(rp):
+        try:
+            with open(rp, encoding="utf-8") as f:
+                r = json.load(f)
+            if not r.get("通过", True):
+                out.append(
+                    f"第一段：{r.get('未完成批次数', 0)} 批未完成，"
+                    f"{r.get('缺失回执总数', 0)} 个块缺回执，"
+                    f"{r.get('数量不符总数', 0)} 个块条数不符")
+        except (OSError, ValueError):
+            out.append("第一段：校验报告读不出来")
+    sp = os.path.join(workdir, "stage2.json")
+    if os.path.exists(sp):
+        try:
+            stage1 = workspace.load_stage1(workdir)
+            doc = workspace.load_document(workdir)
+            ctx = Context.from_dir(mem_dir)
+            v2 = verify_stage2(workspace.load_stage2(workdir), ctx=ctx,
+                               stage1=stage1, doc=doc)
+            if not v2["通过"]:
+                out.append(
+                    f"第二段：{v2['无依据的关联']} 条无依据，"
+                    f"{v2['悬空引用']} 处悬空，"
+                    f"{len(v2['引文无法核对'])} 条引文对不上来源")
+        except Exception as e:  # 读不出来也算没通过，不假装正常
+            out.append(f"第二段：校验失败（{type(e).__name__}）")
+    return out
 
 
 def cmd_render(args) -> int:
@@ -134,9 +179,22 @@ def cmd_render(args) -> int:
     p = os.path.join(args.workdir, "stage2.json")
     if os.path.exists(p):
         stage2 = workspace.load_stage2(args.workdir)
+
+    mem_dir = getattr(args, "mem_dir", DEFAULT_MEM_DIR)
+    failures = _workdir_failures(args.workdir, mem_dir)
+    if failures and not getattr(args, "allow_failed", False):
+        print("✘ 工作区校验未通过，没有生成文档：", file=sys.stderr)
+        for f in failures:
+            print(f"  - {f}", file=sys.stderr)
+        print("  确实要生成（文档会带警告），加 --allow-failed", file=sys.stderr)
+        return 2
+
     depth_note = DEPTH_HINT.get(args.depth, "")
     md = render(stage1, stage2, title=args.title, source_note=args.source_note,
                 depth_note=depth_note)
+    if failures:
+        md = ("> ⚠ **校验未通过**：" + "；".join(failures)
+              + "\n>\n> 下面的内容可能不完整或缺少依据，别当成可信成品。\n\n" + md)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(md)
     print(f"✓ {args.out} （{len(md):,} 字符）")
@@ -146,12 +204,22 @@ def cmd_render(args) -> int:
 def cmd_verify(args) -> int:
     doc = workspace.load_document(args.workdir)
     stage1 = workspace.load_stage1(args.workdir)
-    v1 = verify_stage1(stage1, doc)
+    report = None
+    rp = os.path.join(args.workdir, "stage1_report.json")
+    if os.path.exists(rp):
+        try:
+            with open(rp, encoding="utf-8") as f:
+                report = json.load(f)
+        except (OSError, ValueError):
+            report = None
+    v1 = verify_stage1(stage1, doc, report)
     print("第一段：", {k: v1[k] for k in ("总数", "定位成功", "无法定位", "归属错误", "通过")})
     ok = v1["通过"]
     p = os.path.join(args.workdir, "stage2.json")
     if os.path.exists(p):
-        v2 = verify_stage2(workspace.load_stage2(args.workdir))
+        ctx = Context.from_dir(getattr(args, "mem_dir", DEFAULT_MEM_DIR))
+        v2 = verify_stage2(workspace.load_stage2(args.workdir), ctx=ctx,
+                           stage1=stage1, doc=doc)
         print("第二段：", {k: v2[k] for k in ("关联条数", "无依据的关联", "悬空引用", "通过")})
         ok = ok and v2["通过"]
     return 0 if ok else 2
@@ -200,14 +268,14 @@ def cmd_plan(args) -> int:
 
 def cmd_prompt(args) -> int:
     from .orchestrate import batch_dir
-    from .distill.stage1 import load_template, make_batches, render_blocks
+    from .distill.stage1 import build_system_prompt, make_batches, render_blocks
     from . import workspace
     doc = workspace.load_document(args.workdir)
     batches = make_batches(doc, args.batch_size)
     if not (1 <= args.batch <= len(batches)):
         print(f"没有第 {args.batch} 批（共 {len(batches)} 批）", file=sys.stderr)
         return 1
-    system = load_template("stage1_system.md")
+    system = build_system_prompt(doc.source.kind)
     user = render_blocks(batches[args.batch - 1])
     print(f"=== SYSTEM ===\n{system}\n\n=== USER ===\n{user}")
     return 0
@@ -217,7 +285,9 @@ def cmd_collect(args) -> int:
     from .orchestrate import collect
     r = collect(args.workdir, args.batch_size, args.max_insights)
     v = r.get("verify", {})
-    print(f"批数 {r['批数']} ｜ 回执缺失 {r['缺失回执总数']}")
+    print(f"批数 {r['批数']} ｜ 回执缺失 {r['缺失回执总数']} ｜ "
+          f"数量不符 {r.get('数量不符总数', 0)} ｜ "
+          f"失败批次 {r.get('失败批次数', 0)}")
     print(f"摘录定位 {v.get('定位成功', 0)}/{v.get('总数', 0)} ｜ "
           f"无法定位 {v.get('无法定位', 0)} ｜ 归属错误 {v.get('归属错误', 0)}")
     for m in (v.get("无法定位明细") or [])[:8]:
@@ -235,8 +305,16 @@ def cmd_collect(args) -> int:
                   f"覆盖 {pb.get('覆盖块数','?')} 块）")
             if sel.get("类型分布"):
                 print("  类型：" + " ".join(f"{k}{v}" for k, v in sel["类型分布"].items()))
+    if r.get("多余输出"):
+        print(f"  ⚠ 多出 {len(r['多余输出'])} 个批次文件"
+              "（可能是上次跑剩下的，未计入本次）：")
+        for f in r["多余输出"][:5]:
+            print(f"     {f}")
+    if not r.get("通过", False):
+        print("  ✘ 第一段未通过：批次没跑完 / 回执对不上 / 零产出，"
+              "不要直接交给第二段", file=sys.stderr)
     print(f"→ stage1.json 已写入 {args.workdir}")
-    return 0 if v.get("通过") else 2
+    return 0 if r.get("通过") else 2
 
 
 def cmd_stage2_prompt(args) -> int:
@@ -313,7 +391,8 @@ def cmd_frames(args) -> int:
     r = grab_frames(args.url, args.at, window=args.window,
                     fps=args.fps, scene_detect=args.scene,
                     max_frames=args.max_frames,
-                    outdir=args.outdir)
+                    outdir=args.outdir,
+                    use_browser_cookies=args.cookies)
     if not r.get("ok"):
         print(f"✘ {r.get('reason', '失败')}", file=sys.stderr)
         return 1
@@ -345,7 +424,11 @@ def cmd_run(args) -> int:
         return rc
     rc = cmd_stage2(args)
     if rc:
-        print("⚠ 第二段没过校验，仍继续渲染（问题会记在文档里）")
+        if not getattr(args, "allow_failed", False):
+            print("✘ 第二段没过校验，已停止（加 --allow-failed 可强行渲染）",
+                  file=sys.stderr)
+            return rc
+        print("⚠ 第二段没过校验，仍继续渲染（文档会带警告）")
     return cmd_render(args)
 
 
@@ -389,10 +472,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--title", default="")
     p.add_argument("--source-note", default="")
     p.add_argument("--depth", default="standard", choices=list(DEPTH_HINT))
+    p.add_argument("--mem-dir", default=DEFAULT_MEM_DIR)
+    p.add_argument("--allow-failed", action="store_true",
+                   help="校验未通过也生成（文档顶部会带警告）")
     p.set_defaults(func=cmd_render)
 
     p = sub.add_parser("verify", help="校验")
     p.add_argument("--workdir", required=True)
+    p.add_argument("--mem-dir", default=DEFAULT_MEM_DIR)
     p.set_defaults(func=cmd_verify)
 
     # ---- 编排者模式 ----
@@ -460,6 +547,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--scene", action="store_true", help="用场景变化检测抽帧")
     p.add_argument("--max-frames", type=int, default=12)
     p.add_argument("--outdir")
+    p.add_argument("--cookies", action="store_true",
+                   help="允许读取 Hermes 浏览器 profile 的 cookie（默认不用）")
     p.set_defaults(func=cmd_frames)
 
     p = sub.add_parser("check-skill", help="检查一个 skill 的元信息合规性")
@@ -478,6 +567,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--mem-dir", default=DEFAULT_MEM_DIR)
     p.add_argument("--mem-files", nargs="*", default=None)
     p.add_argument("--sessions", default=None)
+    p.add_argument("--allow-failed", action="store_true",
+                   help="校验未通过也继续/生成（文档会带警告）")
     common(p)
     p.set_defaults(func=cmd_run)
 

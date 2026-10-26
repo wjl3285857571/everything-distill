@@ -160,9 +160,9 @@ def default_runner(kind: str = "hermes", **kwargs) -> Runner:
     if kind == "hermes":
         return HermesRunner(**kwargs)
     if kind == "file":
-        return FileRunner(**kwargs["path"])
+        return FileRunner(path=kwargs["path"])
     if kind == "command":
-        return CommandRunner(**kwargs["template"], **{
+        return CommandRunner(template=kwargs["template"], **{
             k: v for k, v in kwargs.items()
             if k in ("timeout", "cwd")
         })

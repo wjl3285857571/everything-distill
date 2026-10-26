@@ -8,29 +8,28 @@ median 延迟 ~49ms（官方口径），实测老梁 27 分钟视频 13s 返回 
     - 失败/无额度时自动落到 yt-dlp，不挡路
 
 key 管理：
-    放 ~/Projects/everything-distill/.env 的 SUPADATA_API_KEY=
-    文件不入库；额度用完 API 返回 402/429，调用方落回下级即可。
+    放项目 .env 的 SUPADATA_API_KEY=，或环境变量。
+    `ed.config` 会按「项目根目录 → 当前目录 → 旧路径 → 环境变量」找，
+    不再写死某台机器的绝对路径；额度用完 API 返回 402/429，调用方落回下级即可。
+
+请求构造：
+    视频 URL 必须整体做百分号编码后放进 `url` 参数。
+    直接拼 `?url={url}` 时，链接里的 `&list=...&index=...` 会被服务器
+    当成 Supadata 自己的参数，导致视频地址被截断。
 """
 
 import json
-import os
+import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
+
+from ..config import get_env
 
 API_URL = "https://api.supadata.ai/v1/transcript"
 
 
 def _api_key() -> Optional[str]:
-    """从项目 .env 读 key（不写入代码库）。"""
-    env_file = os.path.expanduser(
-        "~/Projects/everything-distill/.env")
-    if os.path.exists(env_file):
-        for line in open(env_file, encoding="utf-8"):
-            line = line.strip()
-            if line.startswith("SUPADATA_API_KEY="):
-                v = line.split("=", 1)[1].strip().strip('"').strip("'")
-                if v:
-                    return v
-    return os.environ.get("SUPADATA_API_KEY")
+    """从 .env / 环境变量读 key（不写入代码库）。"""
+    return get_env("SUPADATA_API_KEY") or None
 
 
 def _fmt(ms: float) -> str:
@@ -66,6 +65,14 @@ def _merge_segments(segs: List[Dict[str, Any]],
     return out
 
 
+def build_request_url(url: str) -> str:
+    """把视频 URL 正确编码进 Supadata 查询参数。
+
+    单独抽成函数是为了能测：带 `&list=` / `&index=` 的链接必须完整保留。
+    """
+    return f"{API_URL}?{urllib.parse.urlencode({'url': url})}"
+
+
 def fetch_transcript_supadata(url: str) -> Dict[str, Any]:
     """Supadata 转录。返回 {"ok", "text", "segments", "via"} 或失败原因。
 
@@ -82,7 +89,8 @@ def fetch_transcript_supadata(url: str) -> Dict[str, Any]:
     import subprocess
     p = subprocess.run(
         ["curl", "-s", "--max-time", "120",
-         f"{API_URL}?url={url}", "-H", f"x-api-key: {key}"],
+         build_request_url(url),
+         "-H", f"x-api-key: {key}"],
         capture_output=True, text=True, timeout=150)
     raw = p.stdout.strip()
     if not raw:

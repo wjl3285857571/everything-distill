@@ -86,6 +86,34 @@ def claimed_count(receipt: str) -> Optional[int]:
     return None
 
 
+def check_batch_receipts(blocks, raw: str, items
+                         ) -> Tuple[List[int], List[Dict[str, Any]]]:
+    """核对一批的回执：缺哪些块、哪些块的条数对不上。
+
+    回执是模型的自述，必须和程序实际解析到的条目数对照。
+    以前只检查「有没有这一块」，所以回执写「0 条」但实际有 5 条也能过。
+    """
+    receipts = parse_receipts(raw)
+    missing = [b.index for b in blocks if b.index not in receipts]
+    actual: Dict[int, int] = {}
+    for ins in items:
+        b = ins.locator.block
+        if b:
+            actual[b] = actual.get(b, 0) + 1
+    mismatches: List[Dict[str, Any]] = []
+    for b in blocks:
+        if b.index not in receipts:
+            continue
+        claimed = claimed_count(receipts[b.index])
+        real = actual.get(b.index, 0)
+        if claimed is None:
+            mismatches.append({"块": b.index, "声称": None, "实际": real,
+                               "原因": "回执里没写条数"})
+        elif claimed != real:
+            mismatches.append({"块": b.index, "声称": claimed, "实际": real})
+    return missing, mismatches
+
+
 # ---------------------------------------------------------------- 批次
 
 
@@ -110,6 +138,22 @@ def load_template(name: str) -> str:
         return f.read()
 
 
+def build_system_prompt(source_kind: str = "") -> str:
+    """组装第一段 system prompt（论文模式在这里统一挂载）。
+
+    `run_stage1` / `plan` / `prompt` 都走这一个函数——以前只有直接跑 stage1
+    会挂论文提示，README 推荐的 plan 分批路径反而没有。
+    """
+    system = load_template("stage1_system.md")
+    if source_kind in ("arxiv", "paper"):
+        system = system.replace(
+            "\n---\n\n以下是本次要处理的文本块",
+            "\n\n" + load_template("stage1_paper.md")
+            + "\n---\n\n以下是本次要处理的文本块",
+        )
+    return system
+
+
 # ---------------------------------------------------------------- 主流程
 
 
@@ -126,14 +170,7 @@ def run_stage1(
     批次之间没有依赖，可以并发。每批是一次独立的模型调用，
     串行的话一本书要等 N 倍单批时间；并发后总时长约等于最慢那批。
     """
-    system = load_template("stage1_system.md")
-    # 论文有它自己的语义骨架，额外挂一段追问集（不改通用规则）
-    if doc.source.kind in ("arxiv", "paper"):
-        system = system.replace(
-            "\n---\n\n以下是本次要处理的文本块",
-            "\n\n" + load_template("stage1_paper.md")
-            + "\n---\n\n以下是本次要处理的文本块",
-        )
+    system = build_system_prompt(doc.source.kind)
     batches = make_batches(doc, batch_size)
     total_batches = len(batches)
 
@@ -183,6 +220,7 @@ def run_stage1(
             continue
         data = res["data"]
         batch_insights: List[Insight] = []
+        batch_counters: List[Insight] = []
         for raw_i in data.get("insights", []) or []:
             ins = _make_insight(raw_i, next_id, doc)
             next_id += 1
@@ -193,6 +231,7 @@ def run_stage1(
             c = _make_insight(raw_c, next_id, doc, force_type="counter")
             next_id += 1
             counters.append(c)
+            batch_counters.append(c)
 
         for g in data.get("glossary", []) or []:
             if g.get("term") and g.get("definition"):
@@ -206,20 +245,36 @@ def run_stage1(
             if isinstance(q, str) and q.strip():
                 open_questions.append(q.strip())
 
-        receipts = parse_receipts(res["raw"])
-        missing = [b.index for b in blocks if b.index not in receipts]
+        missing, mismatches = check_batch_receipts(
+            blocks, res["raw"], batch_insights + batch_counters)
+        if missing:
+            status = "缺回执"
+        elif mismatches:
+            status = "数量不符"
+        else:
+            status = "完整"
         receipts_log.append({
             "批次": None,
-            "状态": "缺回执" if missing else "完整",
+            "状态": status,
             "块": [b.index for b in blocks],
             "缺回执": missing,
-            "条目数": len(batch_insights),
+            "数量不符": mismatches,
+            "条目数": len(batch_insights) + len(batch_counters),
         })
 
+    unfinished = [r for r in receipts_log if r.get("状态") != "完整"]
+    produced = len(insights) + len(counters)
     report = {
         "批数": len(batches),
         "回执": receipts_log,
         "缺失回执总数": sum(len(r.get("缺回执", [])) for r in receipts_log),
+        "数量不符总数": sum(len(r.get("数量不符", [])) for r in receipts_log),
+        "失败批次数": sum(1 for r in receipts_log if r.get("状态") == "失败"),
+        "未完成批次数": len(unfinished),
+        "产出洞察数": produced,
+        # 批次没跑完 / 回执对不上 / 一条洞察都没产出，都不算通过。
+        # 以前这里只看摘录定位，模型整批失败时 0 条 0 错，反而显示「通过」。
+        "通过": (not unfinished) and (produced > 0 or not doc.blocks),
     }
     stage1 = Stage1(
         source=doc.source,
@@ -274,10 +329,12 @@ def _int_or_none(v) -> Optional[int]:
 # ---------------------------------------------------------------- 校验
 
 
-def verify_stage1(stage1: Stage1, doc: Document) -> Dict[str, Any]:
-    """校验第一段产出：摘录能不能在原文定位。
+def verify_stage1(stage1: Stage1, doc: Document,
+                  report: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """校验第一段产出：摘录能不能在原文定位 + 批次是否真的跑完。
 
-    这是「模型有没有在编」的硬检查。
+    这是「模型有没有在编」的硬检查。`report` 是 run_stage1/collect 的回执
+    记录；传进来时会把「缺回执 / 数量不符 / 批次失败 / 零产出」也算进通过条件。
     """
     missing_support = []
     misattributed = []
@@ -326,6 +383,21 @@ def verify_stage1(stage1: Stage1, doc: Document) -> Dict[str, Any]:
         if (ins.type or "") == "result" and not re.search(r"\d", ins.claim)
     ]
 
+    batch_ok = True
+    batch_info: Dict[str, Any] = {}
+    if report is not None:
+        unfinished = [r for r in report.get("回执", [])
+                      if r.get("状态") != "完整"]
+        batch_ok = not unfinished
+        batch_info = {
+            "未完成批次": len(unfinished),
+            "缺失回执": report.get("缺失回执总数", 0),
+            "数量不符": report.get("数量不符总数", 0),
+            "失败批次": report.get("失败批次数", 0),
+        }
+
+    empty_output = bool(doc.blocks) and not items
+
     return {
         "总数": len(items),
         "定位成功": ok,
@@ -334,5 +406,8 @@ def verify_stage1(stage1: Stage1, doc: Document) -> Dict[str, Any]:
         "归属错误": len(misattributed),
         "归属错误明细": misattributed[:10],
         "无数值结果": no_number,
-        "通过": not missing_support and not misattributed,
+        "批次": batch_info,
+        "空产出": empty_output,
+        "通过": (not missing_support and not misattributed
+                 and batch_ok and not empty_output),
     }

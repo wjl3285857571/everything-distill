@@ -16,6 +16,7 @@ local=true 是关键：googlevideo 直链里烧录了实例服务器的 IP（ip=
 实例列表动态拉 https://api.invidious.io/instances.json，缓存 24h。
 """
 
+import html
 import json
 import os
 import re
@@ -137,51 +138,79 @@ def fetch_subtitle_invidious(url: str) -> Dict[str, Any]:
         return {"ok": False,
                 "reason": f"实例 {inst} 的字幕转发被 Google 反爬拦截（该实例字幕功能暂时不可用）",
                 "instance": inst}
-    text = _vtt_or_xml_to_text(body)
+    text = _vtt_or_xml_to_timed_text(body)
     if not text.strip():
         return {"ok": False, "reason": "字幕是空的", "instance": inst}
     return {"ok": True, "text": text, "instance": inst,
             "lang": best.get("language_code", ""),
             "title": d.get("title", ""),
-            "label": best.get("label", "")}
+            "label": best.get("label", ""),
+            "timed": True}
+
+
+def _stream_to_file(url: str, path: str, timeout: int = 600,
+                    min_bytes: int = 10000) -> int:
+    """把 URL 流式写到文件，返回字节数；太小则删掉文件并返回 0。
+
+    为什么不 urlopen().read()：Invidious 代理的是整段音频，长视频几十上百 MB，
+    一次性读进内存会顶爆。分块写盘，内存占用恒定。
+    """
+    from urllib.request import Request, urlopen
+    written = 0
+    try:
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=timeout) as r, open(path, "wb") as f:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                written += len(chunk)
+        if written < min_bytes:
+            os.unlink(path)
+            return 0
+        return written
+    except Exception:
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+        except OSError:
+            pass
+        return 0
 
 
 def download_audio_invidious(url: str, outdir: str) -> Dict[str, Any]:
-    """通过 Invidious 的 local=true 代理下载音频。"""
+    """通过 Invidious 的 local=true 代理下载音频。
+
+    逐个实例尝试：某个实例元数据能拿到、但音频流 403/超时，换下一个，
+    而不是在同一个实例上把几个 itag 试完就放弃。
+    """
     vid = _vid(url)
-    p = probe(vid)
-    if not p.get("ok"):
-        return {"ok": False, "reason": p.get("reason", "")}
-    inst, d = p["instance"], p["data"]
-    aud = [f for f in (d.get("adaptiveFormats") or [])
-           if "audio" in (f.get("type") or "")]
-    if not aud:
-        return {"ok": False, "reason": f"实例 {inst} 可用但没有音频流",
-                "instance": inst}
-
-    def _br(f: Dict[str, Any]) -> int:
-        return int(f.get("bitrate") or 0)
-
-    aud.sort(key=_br, reverse=True)
-    itag = aud[0].get("itag")
+    if not vid:
+        return {"ok": False, "reason": "不是有效的 YouTube 视频链接"}
     out_path = os.path.join(outdir, f"yt_{vid}.webm")
-    raw = _http(f"https://{inst}/latest_version?id={vid}&itag={itag}&local=true",
-                600)
-    if not raw or len(raw) < 10000:
-        # 逐条降级重试
-        for f in aud[1:4]:
-            raw = _http(f"https://{inst}/latest_version?id={vid}"
-                        f"&itag={f.get('itag')}&local=true", 600)
-            if raw and len(raw) > 10000:
-                break
-        else:
-            return {"ok": False, "reason": "音频代理下载失败（<10KB）",
-                    "instance": inst}
-    with open(out_path, "wb") as f:
-        f.write(raw)
-    return {"ok": True, "path": out_path, "instance": inst,
-            "title": d.get("title", ""),
-            "bytes": len(raw)}
+    last_err = "所有实例都没有可用音频"
+    tried: List[str] = []
+    for inst in _instances()[:5]:
+        d = _get_json(inst, vid)
+        if not d:
+            continue
+        tried.append(inst)
+        aud = [f for f in (d.get("adaptiveFormats") or [])
+               if "audio" in (f.get("type") or "")]
+        if not aud:
+            last_err = f"实例 {inst} 可用但没有音频流"
+            continue
+        aud.sort(key=lambda f: int(f.get("bitrate") or 0), reverse=True)
+        for f in aud[:4]:
+            n = _stream_to_file(
+                f"https://{inst}/latest_version?id={vid}"
+                f"&itag={f.get('itag')}&local=true", out_path)
+            if n:
+                return {"ok": True, "path": out_path, "instance": inst,
+                        "title": d.get("title", ""), "bytes": n}
+        last_err = f"实例 {inst} 音频代理下载失败"
+    return {"ok": False, "reason": last_err, "tried": tried}
 
 
 def _vtt_or_xml_to_text(s: str) -> str:
@@ -228,3 +257,80 @@ def _xml_captions_to_text(s: str) -> str:
         if t:
             out.append(t)
     return " ".join(out)
+
+
+def _ts_hhmmss(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def _normalize_ts(raw: str) -> str:
+    """TTML 的时间写法很杂：00:00:01.000 / 01:02.5 / 12.3s。统一成 HH:MM:SS。"""
+    raw = raw.strip()
+    m = re.match(r"^(\d{1,2}):(\d{2}):(\d{2})(?:[.,]\d+)?$", raw)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}:{m.group(3)}"
+    m = re.match(r"^(\d{1,2}):(\d{2})(?:[.,]\d+)?$", raw)
+    if m:
+        return f"00:{int(m.group(1)):02d}:{m.group(2)}"
+    m = re.match(r"^([\d.]+)s?$", raw)
+    if m:
+        return _ts_hhmmss(float(m.group(1)))
+    return "00:00:00"
+
+
+def _vtt_or_xml_to_timed_text(s: str) -> str:
+    """字幕容器（vtt / ttml / json3）→ `[HH:MM:SS] 文本`，保留时间轴。
+
+    字幕路径以前把时间轴丢掉，导致「每条观点能跳回原视频」在
+    YouTube 字幕链路上是空的。这里三种容器都尽量保住起始时间。
+    """
+    # json3
+    if s.strip().startswith("{"):
+        try:
+            d = json.loads(s)
+            out = []
+            for e in d.get("events") or []:
+                t = "".join(seg.get("utf8", "") for seg in (e.get("segs") or []))
+                t = t.replace("\n", " ").strip()
+                if t:
+                    out.append(
+                        f"[{_ts_hhmmss(float(e.get('tStartMs') or 0) / 1000)}] {t}")
+            if out:
+                return "\n".join(out)
+        except Exception:
+            pass
+
+    # ttml / xml
+    if "<transcript" in s or "<text" in s:
+        out = []
+        for m in re.finditer(
+                r"<(?:text|p)\b([^>]*)>(.*?)</(?:text|p)>", s, re.S):
+            attrs, body = m.group(1), m.group(2)
+            tm = re.search(r'\b(?:start|begin)\s*=\s*"([^"]+)"', attrs)
+            if not tm:
+                continue
+            body = html.unescape(re.sub(r"<[^>]+>", "", body)).strip()
+            if body:
+                out.append(f"[{_normalize_ts(tm.group(1))}] {body}")
+        if out:
+            return "\n".join(out)
+        return _xml_captions_to_text(s)
+
+    # vtt
+    out = []
+    ts = ""
+    for ln in s.splitlines():
+        line = ln.strip()
+        m = re.match(r"(\d{1,2}):(\d{2}):(\d{2})[.,]\d{3}\s*-->", line)
+        if m:
+            ts = f"{int(m.group(1)):02d}:{m.group(2)}:{m.group(3)}"
+            continue
+        if (not line or "-->" in line
+                or line.startswith(("WEBVTT", "Kind:", "Language:", "NOTE"))
+                or re.fullmatch(r"\d+", line)):
+            continue
+        clean = html.unescape(re.sub(r"<[^>]+>", "", line)).strip()
+        if clean and ts:
+            out.append(f"[{ts}] {clean}")
+    return "\n".join(out)

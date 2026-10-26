@@ -26,8 +26,9 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from .distill.stage1 import (BATCH_SIZE, load_template, make_batches,
-                             parse_receipts, render_blocks, _parse)
+from .distill.stage1 import (BATCH_SIZE, build_system_prompt,
+                             check_batch_receipts, load_template,
+                             make_batches, render_blocks, _parse)
 from .ingest.base import Document
 from .schema import Basis, Insight, Locator, Stage1, Stage2
 
@@ -44,7 +45,7 @@ def plan(workdir: str, batch_size: int = BATCH_SIZE) -> List[Dict[str, Any]]:
     """列出批次，并为每批生成 prompt 文件。"""
     doc = _load_doc(workdir)
     batches = make_batches(doc, batch_size)
-    system = load_template("stage1_system.md")
+    system = build_system_prompt(doc.source.kind)
     d = batch_dir(workdir)
     out = []
     for i, blocks in enumerate(batches, 1):
@@ -65,7 +66,47 @@ def plan(workdir: str, batch_size: int = BATCH_SIZE) -> List[Dict[str, Any]]:
             "prompt": os.path.join(d, f"{bid}.txt"),
             "output": os.path.join(d, f"{bid}.out"),
         })
+
+    # 记下这次 plan 的批次划分。collect 以它为准，避免用户改了
+    # --batch-size 之后，plan 和 collect 对不上、把结果收错批。
+    manifest = {
+        "batch_size": batch_size,
+        "block_count": len(doc.blocks),
+        "batches": [{"batch": i, "blocks": [b.index for b in blocks]}
+                    for i, blocks in enumerate(batches, 1)],
+    }
+    with open(os.path.join(d, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
     return out
+
+
+def _expected_batches(doc: Document, batch_size: int, d: str) -> List[List]:
+    """优先用 plan 写的 manifest；没有就按 batch_size 现算。"""
+    mp = os.path.join(d, "manifest.json")
+    if os.path.exists(mp):
+        try:
+            with open(mp, encoding="utf-8") as f:
+                m = json.load(f)
+            by_index = {b.index: b for b in doc.blocks}
+            out = []
+            for item in m.get("batches", []):
+                blocks = [by_index[i] for i in item.get("blocks", [])
+                          if i in by_index]
+                if blocks:
+                    out.append(blocks)
+            if out:
+                return out
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return make_batches(doc, batch_size)
+
+
+def _extra_outputs(d: str, expected: int) -> List[str]:
+    """批次文件比预期多：多半是上一次跑更大规模留下的，提醒一下。"""
+    files = sorted(glob.glob(os.path.join(d, "batch_*.out")))
+    if len(files) <= expected:
+        return []
+    return [os.path.basename(f) for f in files[expected:]]
 
 
 def _load_doc(workdir: str) -> Document:
@@ -78,8 +119,8 @@ def collect(workdir: str, batch_size: int = BATCH_SIZE,
     """收集各批的模型返回，合并、筛选、校验、落盘 stage1.json。"""
     from . import workspace
     doc = _load_doc(workdir)
-    batches = make_batches(doc, batch_size)
     d = batch_dir(workdir)
+    batches = _expected_batches(doc, batch_size, d)
 
     insights: List[Insight] = []
     counters: List[Insight] = []
@@ -109,6 +150,7 @@ def collect(workdir: str, batch_size: int = BATCH_SIZE,
             continue
 
         batch_insights: List[Insight] = []
+        batch_counters: List[Insight] = []
         for raw_i in data.get("insights", []) or []:
             ins = _insight(raw_i, next_id, force_type="")
             next_id += 1
@@ -118,6 +160,7 @@ def collect(workdir: str, batch_size: int = BATCH_SIZE,
             c = _insight(raw_c, next_id, force_type="counter")
             next_id += 1
             counters.append(c)
+            batch_counters.append(c)
         for g in data.get("glossary", []) or []:
             if g.get("term") and g.get("definition"):
                 glossary.append({
@@ -129,14 +172,21 @@ def collect(workdir: str, batch_size: int = BATCH_SIZE,
             if isinstance(q, str) and q.strip():
                 open_questions.append(q.strip())
 
-        receipts = parse_receipts(raw)
-        missing = [b.index for b in blocks if b.index not in receipts]
+        missing, mismatches = check_batch_receipts(
+            blocks, raw, batch_insights + batch_counters)
+        if missing:
+            status = "缺回执"
+        elif mismatches:
+            status = "数量不符"
+        else:
+            status = "完整"
         receipts_log.append({
             "批次": i,
-            "状态": "缺回执" if missing else "完整",
+            "状态": status,
             "块": [b.index for b in blocks],
             "缺回执": missing,
-            "条目数": len(batch_insights),
+            "数量不符": mismatches,
+            "条目数": len(batch_insights) + len(batch_counters),
         })
 
     stage1 = Stage1(
@@ -166,11 +216,26 @@ def collect(workdir: str, batch_size: int = BATCH_SIZE,
     stage1.insights = sel["insights"]
 
     from .distill.stage1 import verify_stage1
-    v = verify_stage1(stage1, doc)
-    report = {"批数": len(batches), "回执": receipts_log,
-              "缺失回执总数": sum(len(r.get("缺回执", [])) for r in receipts_log),
-              "筛选": sel["报告"],
-              "verify": v}
+    unfinished = [r for r in receipts_log if r.get("状态") != "完整"]
+    partial = {
+        "回执": receipts_log,
+        "缺失回执总数": sum(len(r.get("缺回执", [])) for r in receipts_log),
+        "数量不符总数": sum(len(r.get("数量不符", [])) for r in receipts_log),
+        "失败批次数": sum(1 for r in receipts_log if r.get("状态") == "失败"),
+    }
+    v = verify_stage1(stage1, doc, partial)
+    produced = len(insights) + len(counters)
+    report = {
+        "批数": len(batches),
+        "回执": receipts_log,
+        **{k: val for k, val in partial.items() if k != "回执"},
+        "未完成批次数": len(unfinished),
+        "产出洞察数": produced,
+        "多余输出": _extra_outputs(d, len(batches)),
+        "筛选": sel["报告"],
+        "verify": v,
+        "通过": v["通过"] and not unfinished and (produced > 0 or not doc.blocks),
+    }
     workspace.save_stage1(workdir, stage1, report)
     return report
 
@@ -299,6 +364,16 @@ def collect2(workdir: str, out_path: Optional[str] = None) -> Dict[str, Any]:
         insights=insights,
     )
     workspace.save_stage2(workdir, stage2)
-    v = verify_stage2(stage2)
+    # 引文要回来源核对：记忆文件 / 会话片段 / 原文。
+    # 只查「编号存在 + 引文非空」是拦不住模型自己编一句漂亮话的。
+    try:
+        stage1 = workspace.load_stage1(workdir)
+    except Exception:
+        stage1 = None
+    try:
+        doc = workspace.load_document(workdir)
+    except Exception:
+        doc = None
+    v = verify_stage2(stage2, ctx=_default_context(), stage1=stage1, doc=doc)
     return {"关联": len(stage2.relevant), "依据": len(stage2.basis),
             "校验": v}

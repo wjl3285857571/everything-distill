@@ -255,14 +255,50 @@ def read_epub(path: str) -> Tuple[str, str, str]:
         return "\n\n".join(chunks), title, author
 
 
+_DOCX_HEADING = re.compile(r'w:pStyle\s+w:val="([^"]+)"')
+
+
+def _docx_heading_level(style: str) -> int:
+    """把 Word 的段落样式映射成 markdown 标题层级。
+
+    覆盖英文（Heading1 / heading 1）、中文（标题1 / 标题 1）和纯数字
+    （1..6，部分模板直接拿数字当样式名）三种写法。
+    """
+    s = (style or "").strip()
+    m = re.search(r"(?:heading|标题)\s*([1-6])", s, re.I)
+    if m:
+        return int(m.group(1))
+    if re.fullmatch(r"[1-6]", s):
+        return int(s)
+    return 0
+
+
 def read_docx(path: str) -> str:
+    """DOCX → 带 markdown 标题的文本。
+
+    以前只是把 XML 标签去掉，标题样式全丢；长 Word 文档会变成一整篇
+    没有章节结构的文字，切块和定位都跟着变差。
+    """
     with zipfile.ZipFile(path) as z:
         xml = z.read("word/document.xml").decode("utf-8", "replace")
-    xml = re.sub(r"</w:p>", "\n", xml)
-    xml = re.sub(r"<w:br[^>]*/>", "\n", xml)
-    xml = re.sub(r"<w:tab[^>]*/>", "\t", xml)
-    txt = re.sub(r"<[^>]+>", "", xml)
-    return re.sub(r"\n{3,}", "\n\n", txt).strip()
+
+    out: List[str] = []
+    for para in re.split(r"</w:p>", xml):
+        if not para.strip():
+            continue
+        sm = _DOCX_HEADING.search(para)
+        level = _docx_heading_level(sm.group(1)) if sm else 0
+        body = re.sub(r"<w:br[^>]*/>", "\n", para)
+        body = re.sub(r"<w:tab[^>]*/>", "\t", body)
+        body = re.sub(r"<[^>]+>", "", body)
+        body = html.unescape(body).strip()
+        if not body:
+            continue
+        if level:
+            out.append("#" * level + " " + re.sub(r"\s+", " ", body))
+        else:
+            out.append(body)
+    return re.sub(r"\n{3,}", "\n\n", "\n\n".join(out)).strip()
 
 
 def read_pdf(path: str) -> Tuple[str, bool]:
@@ -366,7 +402,9 @@ def read_transcript_json(path: str) -> str:
     """
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    segs = data.get("segments") if isinstance(data, dict) else data
+    segs = (data.get("segments") or data.get("cues")
+            or data.get("transcript") or data.get("items") or []
+            if isinstance(data, dict) else data)
     if not isinstance(segs, list):
         segs = []
     out = []
@@ -384,10 +422,11 @@ def read_transcript_json(path: str) -> str:
 
 
 def _fmt_ts(sec: float) -> str:
+    """统一 HH:MM:SS —— 下游清洗、抽帧、视觉线索都按三段式解析。"""
     sec = float(sec)
     h, rem = divmod(int(sec), 3600)
     m, s = divmod(rem, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 # ---------------------------------------------------------------- 切块
@@ -524,6 +563,26 @@ def _weibo_visitor_cookie() -> str:
     return f"SUB={sub.group(1)}; SUBP={subp.group(1)}"
 
 
+def _weibo_long_text(pid: str, headers) -> str:
+    """长微博全文。列表接口只返回预览，extend 接口才有完整正文。"""
+    import html as _html
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "--max-time", "20",
+             f"https://m.weibo.cn/statuses/extend?id={pid}", *headers],
+            capture_output=True, text=True, timeout=40)
+        d = json.loads(r.stdout)
+        raw = (d.get("data") or {}).get("longTextContent") or ""
+        if not raw:
+            return ""
+        raw = _html.unescape(raw)
+        raw = re.sub(r"<br\s*/?>", "\n", raw)
+        return re.sub(r"<[^>]+>", "", raw).strip()
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+        return ""
+
+
 def load_weibo(url: str) -> Document:
     """微博单条帖 → Document。游客 cookie + m.weibo.cn JSON 接口，免登录。"""
     import html as _html
@@ -557,6 +616,13 @@ def load_weibo(url: str) -> Document:
     text_raw = _html.unescape(mb.get("text") or "")
     text = re.sub(r"<br\s*/?>", "\n", text_raw)
     text = re.sub(r"<[^>]+>", "", text)
+
+    # 长微博：列表接口只给预览，必须再请求 extend 接口拿全文，
+    # 否则蒸馏的是被截断的前半段，用户还以为拿到的是完整内容。
+    if mb.get("isLongText"):
+        long_text = _weibo_long_text(pid, headers)
+        if long_text:
+            text = long_text
 
     parts = [text.strip()]
     pics = [p.get("large", {}).get("geo", {}).get("original_path")

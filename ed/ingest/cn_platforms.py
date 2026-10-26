@@ -155,16 +155,16 @@ def douyin_download_audio(url: str, outdir: str) -> Dict[str, Any]:
     attempts = []
     if info.get("ok"):
         video_path = os.path.join(outdir, f"dy_{vid}.mp4")
-        st, _ = _http(info["video_url"], headers={
-            "Referer": "https://www.douyin.com/"}, timeout=600)
-        # _http 返回文本会破坏二进制 —— 用 curl 落盘
+        # 只用 curl 下一次。以前这里先用 _http 把视频当文本读一遍、
+        # 再 curl 一遍，同一条视频请求两次，白白浪费一次带宽和内存。
         p = subprocess.run(
             ["curl", "-s", "-L", "-o", video_path,
              "-H", f"User-Agent: {MOBILE_UA}",
              "-H", "Referer: https://www.douyin.com/",
              info["video_url"]],
             capture_output=True, timeout=600)
-        if p.returncode == 0 and os.path.getsize(video_path) > 50000:
+        if (p.returncode == 0 and os.path.exists(video_path)
+                and os.path.getsize(video_path) > 50000):
             attempts.append({"步骤": "分享页直链", "成功": True})
             audio = _extract_audio(video_path, os.path.join(outdir, f"dy_{vid}.mp3"))
             if audio:

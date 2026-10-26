@@ -32,12 +32,15 @@ def _ts_to_sec(ts: str) -> float:
     return parts[0] * 3600 + parts[1] * 60 + parts[2]
 
 
-def _browser_cookie_args() -> List[str]:
-    """Hermes 托管浏览器 profile 的 cookie（Chrome 登录态副本）。
+def _browser_cookie_args(use_browser_cookies: bool) -> List[str]:
+    """Hermes 托管浏览器 profile 的 cookie。
 
-    Keychain 拒绝时 yt-dlp 解不出 cookie（Extracted 0 cookies），
-    那就退回无 cookie 模式 —— 诊断里如实说。
+    默认不用：项目原则是「不依赖登录态」，而且读浏览器 cookie 是
+    用户应该明确知道并同意的事。需要时显式开 `use_browser_cookies`
+    （CLI 是 --cookies）。
     """
+    if not use_browser_cookies:
+        return []
     prof = os.path.expanduser("~/.hermes/browser-profile/chrome")
     if not os.path.isdir(prof):
         return []
@@ -47,7 +50,8 @@ def _browser_cookie_args() -> List[str]:
 def grab_frames(url: str, at: str, window: float = 30.0,
                 fps: float = 0.5, scene_detect: bool = False,
                 max_frames: int = 12,
-                outdir: Optional[str] = None) -> Dict[str, Any]:
+                outdir: Optional[str] = None,
+                use_browser_cookies: bool = False) -> Dict[str, Any]:
     """下载 [at-window/2, at+window/2] 的视频片段并抽帧。
 
     at:            时间戳 "00:12:30" 或 "750"（秒）
@@ -67,10 +71,13 @@ def grab_frames(url: str, at: str, window: float = 30.0,
 
     td = outdir or tempfile.mkdtemp(prefix="ed-frames-")
     clip = os.path.join(td, "clip.mp4")
+    # 每次抽帧单独一个子目录：复用 outdir 时不会把上一次的旧帧混进来
+    frames_dir = os.path.join(td, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
 
-    # ① 下载片段（带浏览器 cookie 走现有网络策略）
+    # ① 下载片段（是否带浏览器 cookie 由调用方显式决定）
     p = subprocess.run(
-        ["yt-dlp", *_browser_cookie_args(),
+        ["yt-dlp", *_browser_cookie_args(use_browser_cookies),
          "-f", "bv*[height<=720]+ba/b[height<=720]/bv*/b",  # 抽帧不需要 4K
          "--download-sections", seg,
          "--force-keyframes-at-cuts",
@@ -88,7 +95,7 @@ def grab_frames(url: str, at: str, window: float = 30.0,
     # ② 抽帧：场景检测 或 固定帧率
     vf = (f"select='gt(scene,0.3)',showinfo" if scene_detect
           else f"fps={fps}")
-    pattern = os.path.join(td, "frame_%03d.jpg")
+    pattern = os.path.join(frames_dir, "frame_%03d.jpg")
     p2 = subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", clip,
          "-vf", vf, "-vsync", "vfr", "-frames:v", str(max_frames), pattern],
@@ -97,7 +104,7 @@ def grab_frames(url: str, at: str, window: float = 30.0,
         return {"ok": False, "reason": f"抽帧失败：{(p2.stderr or '')[:200]}"}
 
     frames = sorted(
-        os.path.join(td, f) for f in os.listdir(td)
+        os.path.join(frames_dir, f) for f in os.listdir(frames_dir)
         if f.startswith("frame_") and f.endswith(".jpg"))
     if not frames:
         return {"ok": False, "reason": "片段太静态，没有抽到帧（可调低 scene 阈值或换 fps）"}

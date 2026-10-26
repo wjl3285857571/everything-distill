@@ -24,21 +24,33 @@ def ensure(workdir: str) -> str:
     return workdir
 
 
+def _atomic_write_text(path: str, text: str) -> None:
+    """先写临时文件再原子替换：中途被打断不会留下半个 JSON。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _dump(path: str, obj) -> None:
+    _atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=2))
+
+
 def save_document(workdir: str, doc: Document) -> None:
     ensure(workdir)
-    with open(os.path.join(workdir, "source.json"), "w", encoding="utf-8") as f:
-        json.dump(doc.source.to_dict(), f, ensure_ascii=False, indent=2)
-    with open(os.path.join(workdir, "blocks.json"), "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "stats": doc.stats,
-                "text": doc.text,
-                "blocks": [
-                    {**b.to_dict(), "text": b.text} for b in doc.blocks
-                ],
-            },
-            f, ensure_ascii=False,
-        )
+    _dump(os.path.join(workdir, "source.json"), doc.source.to_dict())
+    _dump(
+        os.path.join(workdir, "blocks.json"),
+        {
+            "stats": doc.stats,
+            "text": doc.text,
+            "blocks": [
+                {**b.to_dict(), "text": b.text} for b in doc.blocks
+            ],
+        },
+    )
 
 
 def load_document(workdir: str) -> Document:
@@ -54,10 +66,8 @@ def load_document(workdir: str) -> Document:
 
 def save_stage1(workdir: str, stage1: Stage1, report: Dict[str, Any]) -> None:
     ensure(workdir)
-    with open(os.path.join(workdir, "stage1.json"), "w", encoding="utf-8") as f:
-        json.dump(stage1.to_dict(), f, ensure_ascii=False, indent=2)
-    with open(os.path.join(workdir, "stage1_report.json"), "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+    _dump(os.path.join(workdir, "stage1.json"), stage1.to_dict())
+    _dump(os.path.join(workdir, "stage1_report.json"), report)
 
 
 def load_stage1(workdir: str) -> Stage1:
@@ -98,8 +108,7 @@ def _insight_from_dict(x: Dict) -> Insight:
 
 def save_stage2(workdir: str, stage2: Stage2) -> None:
     ensure(workdir)
-    with open(os.path.join(workdir, "stage2.json"), "w", encoding="utf-8") as f:
-        json.dump(stage2.to_dict(), f, ensure_ascii=False, indent=2)
+    _dump(os.path.join(workdir, "stage2.json"), stage2.to_dict())
 
 
 def load_stage2(workdir: str) -> Stage2:
