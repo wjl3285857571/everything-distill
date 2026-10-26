@@ -371,6 +371,8 @@ def render(
                 meta.append(f"位置：{ins.locator.chapter}")
             elif ins.locator.block:
                 meta.append(f"位置：第 {ins.locator.block} 块")
+            if ins.id:
+                meta.append(f"ID：{ins.id}")
             L.append("　".join(meta))
             L.append("")
             if ins.detail:

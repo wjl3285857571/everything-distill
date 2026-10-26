@@ -195,8 +195,21 @@ def _workdir_failures(workdir: str, mem_dir: str) -> List[str]:
     return out
 
 
+def _choose_narration(mode: str, narration):
+    """按 --mode 决定用不用讲述稿。"""
+    if mode == "insights":
+        return None
+    if mode == "narrative" and not narration:
+        raise ValueError("没有 narrate.json，无法出讲述版；先跑 ed narrate")
+    return narration
+
+
 def cmd_render(args) -> int:
     p1 = os.path.join(args.workdir, "stage1.json")
+    mode = getattr(args, "mode", "auto")
+    if mode == "insights" and not os.path.exists(p1):
+        print("✘ 洞察版需要 stage1.json，先跑 ed stage1", file=sys.stderr)
+        return 2
     if os.path.exists(p1):
         stage1 = workspace.load_stage1(args.workdir)
     else:
@@ -219,6 +232,11 @@ def cmd_render(args) -> int:
 
     depth_note = DEPTH_HINT.get(args.depth, "")
     narration = workspace.load_narration(args.workdir)
+    try:
+        narration = _choose_narration(mode, narration)
+    except ValueError as e:
+        print(f"✘ {e}", file=sys.stderr)
+        return 2
     md = render(stage1, stage2, title=args.title, source_note=args.source_note,
                 depth_note=depth_note, narration=narration)
     if failures:
@@ -552,6 +570,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("render", help="生成最终文档")
     p.add_argument("--workdir", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--mode", default="auto",
+                   choices=["auto", "narrative", "insights"],
+                   help="auto=有讲述用讲述；narrative=强制讲述；insights=强制洞察版")
     p.add_argument("--title", default="")
     p.add_argument("--source-note", default="")
     p.add_argument("--depth", default="standard", choices=list(DEPTH_HINT))

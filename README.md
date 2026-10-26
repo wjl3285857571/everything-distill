@@ -158,17 +158,22 @@ python3 -m ed frames "https://youtu.be/xxxx" --at 00:12:30 --scene   # 局部抽
 
 | 形态 | 怎么出 | 正文长什么样 | 适合 |
 |---|---|---|---|
-| **讲述版** | 跑 `narrate` | 按章分节，每节 1200–2500 字连贯正文，关键处引原文 | 读书、看长文，想被讲透 |
-| **卡片版** | 只跑 `stage1`/`stage2` | 结构表 + 关键洞察列表（每条一句 + 原文） | 快速检索、当知识库 |
-| **AI 技能包** | 跑 `package` | 六段结构：什么时候用它 / 核心判断 / 怎么做 / 判断标准 / 什么时候不该用它 / 出处 | 拿给 AI 调用、做成 skill |
+| **讲述版** | `narrate` + `render` | 按章分节，每节 1200–2500 字连贯正文，关键处引原文 | 你自己读，想被讲透 |
+| **洞察版** | `stage1`/`stage2` + `render --mode insights` | 结构表 + 关键洞察（说法、边界、原文、位置、ID） | 拿给 AI 帮你理解、做知识库 |
+| **技能包** | `package` | 六段 SKILL.md | 给 agent 直接调用（可选；会压掉推理和原文） |
 
 **触发方式**（对人说，也对 AI 说）：
 
 - 「讲给我听」「我想读懂」「蒸给我看」→ 讲述版
-- 「蒸给 AI」「拿给 AI 看」「做成 skill / 技能包」→ 跑 `package`
-- 没说清楚：书和长文默认讲述版，短内容默认卡片版
+- 「蒸给 AI」「拿给 AI 看」「帮我理解」→ 洞察版
+- 「做成 skill / 给 agent 用」→ 技能包（可选，表达力有限）
+- 没说清楚：书和长文默认讲述版，短内容默认洞察版
 
-小说和名著请用讲述版。卡片版会把人物和情节压成「原则/案例」，那是把小说讲坏。
+同一个工作区两种都能出：`render --mode narrative` / `--mode insights`，默认 `auto`
+（有讲述稿就用讲述稿）。洞察版是证据密度最高的形态——每条都带原文和位置，
+适合整篇丢给 AI 让它基于证据跟你讨论；技能包只是把结论压成指令，推理和出处都丢了。
+
+小说和名著请用讲述版。洞察版会把人物和情节压成「原则/案例」，那是把小说讲坏。
 
 讲述版也会防模型乱补：引用必须逐字对得上原文；正文里出现原文没有的书名，会被记成
 「外部引用」写进校验报告（提示模型可能拿外部知识套了这本书）。
@@ -482,17 +487,23 @@ knowledge base, not a person reading.
 
 | Shape | How | Body | Best for |
 |---|---|---|---|
-| **Narrative** | run `narrate` | Chapter sections, 1200–2500 characters of prose each, key quotes inline | Books and long reads you want explained |
-| **Cards** | `stage1`/`stage2` only | Structure table + insight list (one line + source quote each) | Fast lookup, knowledge base |
-| **AI skill package** | run `package` | Six sections: when to use / core judgments / how to do it / decision criteria / when not to use / sources | Handing to an AI, installing as a skill |
+| **Narrative** | `narrate` + `render` | Chapter sections, 1200–2500 characters of prose each, key quotes inline | You, reading it |
+| **Insights** | `stage1`/`stage2` + `render --mode insights` | Structure table + insight list (claim, boundary, quote, location, ID) | Handing to an AI to help you understand; knowledge base |
+| **Skill package** | `package` | Six-section SKILL.md | An agent executing it (optional; drops the reasoning and quotes) |
 
 Trigger phrases (for humans and agents):
 
 - "explain it to me" / "I want to understand it" → narrative
-- "distill for AI" / "make it a skill" → `package`
-- unspecified: books and long reads default to narrative; short content defaults to cards
+- "distill for AI" / "show it to an AI" → insights
+- "make it a skill" / "for an agent" → skill package (optional, low expressiveness)
+- unspecified: books and long reads default to narrative; short content defaults to insights
 
-Use narrative for fiction and classics. The card shape compresses characters and plot into
+Both can come out of one workspace: `render --mode narrative` / `--mode insights`; the default
+`auto` uses the narrative when one exists. The insights edition is the densest form — every
+entry carries its source quote and location, so it can be handed to an AI whole; the skill
+package compresses judgments into instructions and loses the reasoning and citations.
+
+Use narrative for fiction and classics. The insights shape compresses characters and plot into
 "principles/cases", which ruins a novel.
 
 ### When validation fails

@@ -715,6 +715,22 @@ class TestSkillPackage(unittest.TestCase):
         self.assertEqual(slugify("Naval's Almanack"), "naval-s-almanack")
 
 
+class TestRenderMode(unittest.TestCase):
+    def test_insights_mode_drops_narration(self):
+        from ed.cli import _choose_narration
+        self.assertIsNone(_choose_narration("insights", object()))
+
+    def test_narrative_mode_requires_narration(self):
+        from ed.cli import _choose_narration
+        with self.assertRaises(ValueError):
+            _choose_narration("narrative", None)
+
+    def test_auto_keeps_narration(self):
+        from ed.cli import _choose_narration
+        marker = object()
+        self.assertIs(_choose_narration("auto", marker), marker)
+
+
 class TestFooter(unittest.TestCase):
     def test_no_personal_claim_without_stage2(self):
         """没有个人化内容时，页脚不该说「个人化结论均挂依据」。"""
