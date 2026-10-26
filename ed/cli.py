@@ -21,13 +21,14 @@ import sys
 from typing import List, Optional
 
 from . import workspace
-from .config import SHORT_DOC_CHARS
+from .config import SHORT_DOC_CHARS, get_env
 from .context.profile import Context
 from .distill.stage1 import run_stage1, verify_stage1
 from .distill.stage2 import run_stage2, snap_basis_to_sources, verify_stage2
 from .ingest.base import load
 from .render.document import render
-from .runner import CommandRunner, FileRunner, HermesRunner, Runner, RunnerError
+from .runner import (CommandRunner, FileRunner, HermesRunner,  # noqa: E402
+                     OpenAICompatibleRunner, Runner, RunnerError)
 
 DEFAULT_MEM_DIR = os.path.expanduser("~/.hermes/memories")
 
@@ -38,15 +39,57 @@ DEPTH_HINT = {
 }
 
 
-def make_runner(args) -> Runner:
-    if args.runner == "hermes":
+def _detect_runner(args) -> Runner:
+    """自动选通道：Hermes → OpenAI 兼容 → 常见 CLI。"""
+    import shutil
+    if shutil.which("hermes"):
         return HermesRunner(timeout=args.timeout)
-    if args.runner == "command":
-        return CommandRunner(template=json.loads(args.command),
-                            timeout=args.timeout)
-    if args.runner == "file":
-        return FileRunner(path=args.command)
-    raise ValueError(args.runner)
+    if get_env(getattr(args, "api_key_env", "OPENAI_API_KEY")):
+        return OpenAICompatibleRunner(
+            base_url=getattr(args, "base_url", "https://api.openai.com/v1"),
+            api_key=get_env(getattr(args, "api_key_env", "OPENAI_API_KEY")),
+            model=getattr(args, "model", "gpt-4o-mini"),
+            timeout=getattr(args, "timeout", 300))
+    for binary, template in (
+        ("claude", ["claude", "-p", "{prompt}"]),
+        ("codex", ["codex", "exec", "{prompt}"]),
+        ("llm", ["llm", "{prompt}"]),
+    ):
+        if shutil.which(binary):
+            return CommandRunner(template, timeout=args.timeout)
+    raise RunnerError(
+        "没有可用的模型通道。三选一：\n"
+        "  1) 装 Hermes：--runner hermes\n"
+        "  2) 用任意 CLI：--runner command --command '[\"claude\",\"-p\",\"{prompt}\"]'\n"
+        "  3) 用 OpenAI 兼容端点：--runner openai --base-url ... --model ... "
+        "（key 放 OPENAI_API_KEY）")
+
+
+def make_runner(args) -> Runner:
+    kind = getattr(args, "runner", "auto")
+    if kind == "auto":
+        runner = _detect_runner(args)
+    elif kind == "hermes":
+        runner = HermesRunner(timeout=args.timeout)
+    elif kind == "openai":
+        key_env = getattr(args, "api_key_env", "OPENAI_API_KEY")
+        key = get_env(key_env)
+        if not key:
+            raise RunnerError(f"缺少 API key：环境变量 {key_env} 为空")
+        runner = OpenAICompatibleRunner(
+            base_url=getattr(args, "base_url", "https://api.openai.com/v1"),
+            api_key=key,
+            model=getattr(args, "model", "gpt-4o-mini"),
+            timeout=getattr(args, "timeout", 300))
+    elif kind == "command":
+        runner = CommandRunner(template=json.loads(args.command),
+                               timeout=args.timeout)
+    elif kind == "file":
+        runner = FileRunner(path=args.command)
+    else:
+        raise ValueError(kind)
+    print(f"模型通道：{getattr(runner, 'label', kind)}")
+    return runner
 
 
 def load_context(args) -> Context:
@@ -514,6 +557,7 @@ def cmd_brief(args) -> int:
         doc, runner,
         max_chars=getattr(args, "max_chars", 14000),
         workers=max(1, min(args.workers, 2)),
+        fast=getattr(args, "fast", False),
         progress=lambda m: print("  " + m, flush=True))
     workspace.save_brief(args.workdir, brief, report)
     md = render_brief(brief, doc.source)
@@ -527,6 +571,9 @@ def cmd_brief(args) -> int:
         if s.error:
             print(f"  ✘ {s.title}：{s.error}")
     print(f"→ {args.out}")
+    if brief.gist:
+        print("\n——— 这内容在讲什么 ———\n")
+        print(brief.gist)
     return 0 if report["通过"] else 2
 
 
@@ -541,7 +588,9 @@ def cmd_run(args) -> int:
         return rc
 
     doc = workspace.load_document(args.workdir)
-    if not _is_short(doc.text):
+    if getattr(args, "fast", False):
+        print("快速模式：只出概述，不逐章讲述。")
+    elif not _is_short(doc.text):
         # 2) 长内容：逐章讲透，brief 作为开头那一节
         rc = cmd_narrate(args)
         if rc and not getattr(args, "allow_failed", False):
@@ -580,10 +629,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p):
-        p.add_argument("--runner", default="hermes",
-                       choices=["hermes", "command", "file"])
+        p.add_argument("--runner", default="auto",
+                       choices=["auto", "hermes", "openai", "command", "file"])
         p.add_argument("--command", default=None,
                        help="command runner 的命令模板（JSON 数组），file runner 的结果文件路径")
+        p.add_argument("--base-url", default=os.environ.get(
+            "OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            help="OpenAI 兼容端点的 base URL")
+        p.add_argument("--model", default=os.environ.get(
+            "OPENAI_MODEL", "gpt-4o-mini"), help="OpenAI 兼容端点的模型名")
+        p.add_argument("--api-key-env", default="OPENAI_API_KEY",
+                       help="从哪个环境变量读 API key")
         p.add_argument("--timeout", type=int, default=900)
         p.add_argument("--batch-size", type=int, default=5)
         p.add_argument("--workers", type=int, default=4,
@@ -606,6 +662,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--max-chars", type=int, default=14000,
                    help="单次喂给模型的最大字数；超过就分层")
+    p.add_argument("--fast", action="store_true",
+                   help="长内容按章采样，一次调用出概述（快，细节少）")
     common(p)
     p.set_defaults(func=cmd_brief)
 
@@ -729,6 +787,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--deep", action="store_true",
                    help="在蒸馏版之后继续跑洞察版（两份都留）")
     p.add_argument("--max-chars", type=int, default=14000)
+    p.add_argument("--fast", action="store_true",
+                   help="长内容按章采样，一次调用出概述（快，细节少）")
     p.add_argument("--max-insights", type=int, default=200,
                    help="第一段最多保留多少条洞察（--deep 时用）")
     p.add_argument("--force-personal", action="store_true",

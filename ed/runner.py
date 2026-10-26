@@ -88,6 +88,8 @@ def parse_json_loose(raw: str) -> Dict:
 class HermesRunner(Runner):
     """调 `hermes -z`。用 Hermes 当前配置的默认模型 —— 不在本项目里写死。"""
 
+    label = "Hermes（hermes -z）"
+
     def __init__(self, binary: str = "hermes", extra_args: Optional[List[str]] = None,
                  cwd: Optional[str] = None, timeout: int = 900):
         self.binary = shutil.which(binary) or binary
@@ -121,6 +123,8 @@ class CommandRunner(Runner):
     命令的 stdout 视为模型输出。
     """
 
+    label = "外部命令"
+
     def __init__(self, template: List[str], timeout: int = 900, cwd: Optional[str] = None):
         self.template = template
         self.timeout = timeout
@@ -145,6 +149,8 @@ class CommandRunner(Runner):
 class FileRunner(Runner):
     """从文件读结果。用于跨进程/人工编排：编排者自己调模型，把结果落盘。"""
 
+    label = "文件（跨进程编排）"
+
     def __init__(self, path: str):
         self.path = path
 
@@ -155,10 +161,65 @@ class FileRunner(Runner):
             return f.read()
 
 
+class OpenAICompatibleRunner(Runner):
+    """任意 OpenAI 兼容端点（OpenAI / DeepSeek / Ollama / vLLM / 自建网关）。
+
+    只用标准库，不引入 SDK；不绑定任何一家厂商。
+    """
+
+    label = "OpenAI 兼容端点"
+
+    def __init__(self, base_url: str = "https://api.openai.com/v1",
+                 api_key: str = "", model: str = "gpt-4o-mini",
+                 timeout: int = 300):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+        self.label = f"OpenAI 兼容（{model}）"
+
+    def run(self, system: str, user: str) -> str:
+        import urllib.error
+        import urllib.request
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": user})
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+        }
+        req = urllib.request.Request(
+            self.base_url + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:300]
+            raise RunnerError(f"模型接口 HTTP {e.code}：{detail}")
+        except Exception as e:
+            raise RunnerError(f"模型接口调用失败：{e}")
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise RunnerError(f"模型接口返回格式不认识：{str(data)[:300]}")
+
+
 def default_runner(kind: str = "hermes", **kwargs) -> Runner:
     """按名字取一个 runner。"""
     if kind == "hermes":
         return HermesRunner(**kwargs)
+    if kind == "openai":
+        return OpenAICompatibleRunner(**kwargs)
     if kind == "file":
         return FileRunner(path=kwargs["path"])
     if kind == "command":

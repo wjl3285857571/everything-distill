@@ -95,6 +95,33 @@ def _synthesis_prompt(doc: Document, sections: List[BriefSection]) -> str:
     return "\n".join(parts)
 
 
+def _digest(doc: Document, per_block: int = 1400,
+            max_total: int = 28_000) -> str:
+    """按块采样：标题 + 开头/结尾各一半。用于「快速」一次调用出全局概述。"""
+    parts: List[str] = []
+    used = 0
+    for b in doc.blocks:
+        text = (b.text or "").strip()
+        if len(text) > per_block:
+            half = per_block // 2
+            text = text[:half] + "\n……\n" + text[-half:]
+        chunk = ((f"## {b.heading}\n\n" if b.heading else "") + text).strip()
+        if used + len(chunk) > max_total:
+            remain = max_total - used
+            if remain > 300:
+                parts.append(chunk[:remain])
+            break
+        parts.append(chunk)
+        used += len(chunk)
+    return "\n\n".join(parts)
+
+
+def _digest_prompt(doc: Document, digest: str) -> str:
+    return ("## 说明\n\n下面是按章节采样的节选，不是全文。只根据这些内容说大致讲什么，"
+            "不要补细节，不要猜测没给的部分。\n\n"
+            f"{_meta(doc)}\n\n## 采样文本\n\n{digest}")
+
+
 def _clean(text: Any) -> str:
     s = str(text or "").strip()
     s = re.sub(r"<<<块\s*\d+>>>", "", s)
@@ -125,7 +152,8 @@ def _section(data: Dict[str, Any], blocks: List) -> BriefSection:
 
 
 def run_brief(doc: Document, runner: Runner, max_chars: int = SINGLE_PASS_LIMIT,
-              workers: int = 2, progress=None) -> Tuple[Brief, Dict[str, Any]]:
+              workers: int = 2, progress=None,
+              fast: bool = False) -> Tuple[Brief, Dict[str, Any]]:
     title = doc.source.title or (doc.blocks[0].heading if doc.blocks else "") or "这份内容"
     if (title.lower().endswith((".txt", ".md", ".pdf", ".epub", ".docx",
                                 ".html", ".htm"))
@@ -136,7 +164,13 @@ def run_brief(doc: Document, runner: Runner, max_chars: int = SINGLE_PASS_LIMIT,
     failed = 0
     mode = "单次" if total <= max_chars else "分层"
 
-    if mode == "单次":
+    if fast and total > 2000:
+        mode = "快速"
+        raw = runner.run(load_template("brief_system.md"),
+                         _digest_prompt(doc, _digest(doc)))
+        gist = _clean(parse_json_loose(raw).get("gist"))
+    elif total <= max_chars:
+        mode = "单次"
         raw = runner.run(load_template("brief_system.md"),
                          _user_prompt(doc, doc.blocks))
         data = parse_json_loose(raw)

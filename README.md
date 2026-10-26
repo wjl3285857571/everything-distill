@@ -54,6 +54,19 @@
 ④ 明确报错 + 给出下一步（换 IP / 手动粘贴），绝不假装成功
 ```
 
+### 5. 不绑定 Hermes
+
+模型通道是可插拔的，默认 `--runner auto` 会按 `Hermes → OpenAI 兼容 → claude / codex / llm`
+的顺序探测；也可以显式指定：
+
+```bash
+python3 -m ed run 书.epub --runner command --command '["claude","-p","{prompt}"]' ...
+python3 -m ed run 书.epub --runner openai --base-url https://api.deepseek.com/v1 --model deepseek-chat ...
+```
+
+没有 shell 的 agent 走 `plan → prompt → collect` 编排模式。根目录的
+[`SKILL.md`](SKILL.md) 是给任意 agent 读的通用说明，不依赖 Hermes。
+
 ## 支持的输入
 
 | 类型 | 平台/格式 | 链路要点 |
@@ -129,6 +142,9 @@ python3 -m ed render --workdir runs/my-video --out 蒸馏版.md
 # 一条命令：先讲一遍 → 逐章讲透 → 蒸馏版
 python3 -m ed run 书.epub --workdir runs/书名 --out 书名-蒸馏版.md
 
+# 长书想快：按章采样，一次调用出概述（细节少）
+python3 -m ed run 书.epub --workdir runs/书名 --out 书名-蒸馏版.md --fast
+
 # 想同时要一份给 AI 的洞察版
 python3 -m ed run 书.epub --workdir runs/书名 --out 书名-蒸馏版.md --deep
 
@@ -171,6 +187,9 @@ python3 -m ed frames "https://youtu.be/xxxx" --at 00:12:30 --scene   # 局部抽
 - 「蒸给 AI」「拿给 AI 看」「帮我理解」→ 洞察版
 
 文件名也照这个来：`书名-蒸馏版.md`、`书名-洞察版.md`，不要再用「讲述版」这个后缀。
+
+**交付时先给概述，再贴文件。** 蒸馏完先用 3–5 句话说清「这内容讲的是什么」，
+再把完整的 `-蒸馏版.md` 贴出来或作为附件；不要只回一句「文件已生成，路径是…」。
 
 同一个工作区两种都能出：`render --mode narrative` / `--mode insights`，默认 `auto`
 （有概述就用概述）。洞察版是证据密度最高的形态——每条都带原文和位置，
@@ -249,7 +268,7 @@ ed/
     document.py        最终文档渲染（分档 / 依据 / 去重）
     brief.py           蒸馏版渲染
 templates/             第一段/第二段的 prompt + brief_*.md + narrate_system.md
-tests/                 132 项回归测试
+tests/                 134 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -472,6 +491,9 @@ python3 -m ed render --workdir runs/my-video --out distilled.md
 # one command: gist → chapter-by-chapter → distilled edition
 python3 -m ed run book.epub --workdir runs/book --out book-distilled.md
 
+# fast: sample each chapter, one model call for the gist (less detail)
+python3 -m ed run book.epub --workdir runs/book --out book-distilled.md --fast
+
 # also produce the AI-facing insights edition
 python3 -m ed run book.epub --workdir runs/book --out book-distilled.md --deep
 
@@ -486,6 +508,11 @@ python3 -m ed render --workdir runs/book --mode narrative --out book-distilled.m
 (600–1200 characters). For long content, `narrate` then writes 1200–2500 characters per
 chapter, and the brief becomes the opening section. Content under 3,000 characters gets the
 brief only — no chapter pass and no personal relevance.
+
+The model backend is pluggable: `--runner auto` probes Hermes, an OpenAI-compatible endpoint,
+then `claude` / `codex` / `llm`. Use `--runner command` for any other CLI, or the
+`plan → prompt → collect` mode for agents without shell access. See
+[`SKILL.md`](SKILL.md) for the full contract.
 
 `narrate` groups blocks by chapter and asks for 1200–2500 characters of connected prose per
 part. The output **no longer** contains a 200-item insight-card list — that shape suits a

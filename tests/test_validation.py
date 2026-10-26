@@ -793,6 +793,53 @@ class TestBrief(unittest.TestCase):
         brief, _ = run_brief(doc, r)
         self.assertEqual(brief.title, "第一章")
 
+    def test_fast_mode_uses_one_call(self):
+        from ed.distill.brief import run_brief
+        b1 = Block(index=1, text="甲" * 8000, heading="第一章")
+        b2 = Block(index=2, text="乙" * 8000, heading="第二章")
+        doc = self._doc(text="甲" * 8000 + "乙" * 8000,
+                        blocks=[b1, b2], title="长书")
+        r = FakeRunner([json.dumps({"gist": "快速概述。" * 40},
+                                   ensure_ascii=False)])
+        brief, report = run_brief(doc, r, max_chars=1000, fast=True)
+        self.assertEqual(report["模式"], "快速")
+        self.assertEqual(len(r.prompts), 1)
+        self.assertTrue(report["通过"])
+
+
+class TestRunners(unittest.TestCase):
+    def test_openai_compatible_payload(self):
+        import urllib.request
+        from ed.runner import OpenAICompatibleRunner
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return (b'{"choices":[{"message":{"content":"hi"}}]}')
+
+        captured = {}
+
+        def fake_urlopen(req, timeout=0):
+            captured["url"] = req.full_url
+            captured["body"] = req.data
+            return Resp()
+
+        with patch.object(urllib.request, "urlopen", fake_urlopen):
+            out = OpenAICompatibleRunner(
+                base_url="http://localhost:1234/v1",
+                api_key="k", model="m").run("sys", "user")
+        self.assertEqual(out, "hi")
+        self.assertEqual(captured["url"],
+                         "http://localhost:1234/v1/chat/completions")
+        body = json.loads(captured["body"].decode())
+        self.assertEqual(body["messages"][0]["role"], "system")
+        self.assertEqual(body["messages"][1]["content"], "user")
+
 
 class TestRunnerFactory(unittest.TestCase):
     def test_file_runner_takes_path_kwarg(self):
