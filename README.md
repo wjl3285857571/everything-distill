@@ -64,12 +64,12 @@
 | 视频 | B 站 | yt-dlp 直连，字幕优先 |
 | 视频 | YouTube | Supadata → yt-dlp → Invidious 三层降级 |
 | 视频 | 抖音 | 官方游客 ttwid 接口 + 分享页直链解析（免登录） |
-| 视频/图文 | 小红书 | 页面 `__INITIAL_STATE__` 解析，视频/图文自动分流 |
+| 视频/图文 | 小红书 | 页面 `__INITIAL_STATE__` 解析；视频转逐字稿，图文的标题/正文/标签直接进蒸馏（纯图片无文字时明确报错） |
 | 播客 | 小宇宙 / 喜马拉雅 | 公开接口直取音频（付费内容诚实报付费墙） |
 | 社交帖 | X/Twitter | fxtwitter 公共镜像 API（免登录） |
 | 社交帖 | 微博 | 官方游客 cookie 自动领取 + 移动端 JSON 接口 |
 | 论文 | arXiv（链接或 ID） | 官方 HTML 全文 + 导出 API 元数据，保留章节层级与公式 |
-| 网页 | 任意博客/文章 | HTML 抓取 + 正文清洗 |
+| 网页 | 任意博客/文章 | HTML 抓取 + 正文区域提取（按文本密度打分，去导航/页脚/侧栏） |
 | 本地文件 | epub / pdf / docx / txt / md / srt / vtt / mp3 / mp4 / wav / webm | 直接解析 |
 | 本地文件 | 音视频（任意上面格式） | 直接进云端 ASR，秒级出时间戳逐字稿 |
 
@@ -203,7 +203,7 @@ ed/
   verify/
     skill_meta.py      产物元信息校验
 templates/             第一段/第二段的 prompt 模板
-tests/                 86 项回归测试
+tests/                 93 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -229,7 +229,7 @@ tests/                 86 项回归测试
 一段式蒸馏时，用户的处境（如「正在找工作」）会让模型只关注相关内容，遗漏其他。分离后第一段保证覆盖度，第二段保证相关性，两头都要。
 
 **为什么「跟你有关」要封顶 30 条？**
-实测模型会给读者生成 68 条关联，其中 9 条在说同一件事——重复的关联是噪音不是价值。封顶 + 按主题分散（每处境最多 2 条）逼出的是多样性而非数量。
+实测模型会给读者生成 68 条关联，其中 9 条在说同一件事——重复的关联是噪音不是价值。封顶 + 按主题分散（每处境最多 2 条）逼出的是多样性而非数量。`today` 档优先，但**也计入这 30 条上限**，不会因为它「宁少勿多」就突破总量。
 
 **为什么失败要说清原因？**
 「失败了」是废物诊断。每条失败都带 `reason_code`（`ip_blocked` / `needs_login` / `paywalled` / `platform_changed` / `missing_key`...）和对应下一步。用户不该在黑盒前猜。
@@ -365,12 +365,12 @@ Every cloud dependency has a free tier, and every link has fallback layers. For 
 | Video | Bilibili | yt-dlp direct, subtitles first |
 | Video | YouTube | Supadata → yt-dlp → Invidious, three-layer fallback |
 | Video | Douyin (TikTok CN) | Official guest ttwid + share-page direct link, no login |
-| Video/Post | Xiaohongshu | `__INITIAL_STATE__` parsing, video vs image-note auto-routing |
+| Video/Post | Xiaohongshu | `__INITIAL_STATE__` parsing; videos become transcripts, image-note title/body/tags go straight into distillation (pure-image notes fail explicitly) |
 | Podcast | Xiaoyuzhou / Ximalaya | Public API, honest paywall errors |
 | Social post | X/Twitter | fxtwitter public mirror API, no login |
 | Social post | Weibo | Auto-fetched guest cookie + mobile JSON API |
 | Paper | arXiv (link or ID) | Official HTML full text + export-API metadata, keeps section structure and formulas |
-| Web page | Any blog/article | HTML fetch + content extraction |
+| Web page | Any blog/article | HTML fetch + main-content extraction (text-density scoring, drops nav/footer/sidebar) |
 | Local files | epub / pdf / docx / txt / md / srt / vtt / mp3 / mp4 / wav / webm | Direct parsing |
 | Local media | Any of the above | Straight into cloud ASR, seconds to timestamped transcript |
 

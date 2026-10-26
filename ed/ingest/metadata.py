@@ -96,7 +96,8 @@ def _from_cn(url: str) -> Dict[str, Any]:
         r = xhs_parse_note(url)
         if r.get("ok"):
             return {"ok": True, "source": "xiaohongshu",
-                    "title": r.get("title", ""), "chapters": []}
+                    "title": r.get("title") or (r.get("desc") or "")[:60],
+                    "chapters": []}
         return {"ok": False, "reason": r.get("reason", "")}
     if re.search(r"xiaoyuzhoufm\.com", url):
         from .podcast import xiaoyuzhou_audio_url

@@ -186,6 +186,148 @@ def html_to_text(raw: str) -> str:
     return clean_html(raw)
 
 
+# ---------------------------------------------------------------- 正文提取
+
+_EXTRACT_SKIP = {
+    "script", "style", "noscript", "template", "svg", "canvas", "iframe",
+    "nav", "header", "footer", "aside", "form", "button", "select", "textarea",
+}
+_BLOCK_FOR_TEXT = {
+    "p", "div", "section", "article", "main", "li", "ul", "ol",
+    "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre",
+    "tr", "td", "th", "br", "hr", "figure", "figcaption", "table", "dd", "dt",
+}
+_CONTENT_HINT = re.compile(
+    r"(content|article|post|entry|main|body|text|story|markdown|prose)", re.I)
+
+
+class _Node:
+    __slots__ = ("tag", "attrs", "children", "parent")
+
+    def __init__(self, tag: str = "", attrs=None, parent=None):
+        self.tag = tag
+        self.attrs = attrs or {}
+        self.children: List[Any] = []
+        self.parent = parent
+
+
+class _TreeBuilder(HTMLParser):
+    """最小 DOM：只为了按容器打分，不做浏览器级的纠错。"""
+
+    _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+             "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = _Node("#document")
+        self.stack: List[_Node] = [self.root]
+
+    def handle_starttag(self, tag, attrs):
+        node = _Node(tag, dict(attrs), self.stack[-1])
+        self.stack[-1].children.append(node)
+        if tag not in self._VOID:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag, attrs):
+        self.stack[-1].children.append(_Node(tag, dict(attrs), self.stack[-1]))
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.stack) - 1, 0, -1):
+            if self.stack[i].tag == tag:
+                del self.stack[i:]
+                break
+
+    def handle_data(self, data):
+        if data:
+            self.stack[-1].children.append(data)
+
+
+def _node_text(node: Any, skip=_EXTRACT_SKIP) -> str:
+    if isinstance(node, str):
+        return node
+    if node.tag in skip:
+        return ""
+    inner = "".join(_node_text(c, skip) for c in node.children)
+    if node.tag in _BLOCK_FOR_TEXT:
+        return "\n" + inner + "\n"
+    return inner
+
+
+def _node_link_text(node: Any) -> str:
+    if isinstance(node, str):
+        return ""
+    if node.tag == "a":
+        return _node_text(node)
+    return "".join(_node_link_text(c) for c in node.children)
+
+
+def _walk(node: Any):
+    yield node
+    if isinstance(node, str):
+        return
+    for c in node.children:
+        yield from _walk(c)
+
+
+def extract_main_text(raw: str) -> str:
+    """网页正文提取：去掉导航、侧栏、页脚、评论等噪声。
+
+    做法是「按文本密度打分」：文本多、链接少的容器更像正文。不引入
+    readability / trafilatura 这类重依赖，对博客和资讯页足够。
+    解析失败时退回原来的整页去标签，不返回空。
+    """
+    try:
+        builder = _TreeBuilder()
+        builder.feed(raw)
+        builder.close()
+    except Exception:
+        return html_to_text(raw)
+
+    def score(node: _Node) -> int:
+        text = _node_text(node).strip()
+        if len(text) < 120:
+            return 0
+        return len(text) - 2 * len(_node_link_text(node).strip())
+
+    best: Any = None
+    best_score = 0
+
+    # ① article / main 最可信
+    for node in _walk(builder.root):
+        if not isinstance(node, str) and node.tag in ("article", "main"):
+            s = score(node)
+            if s > best_score:
+                best, best_score = node, s
+
+    # ② 带正文类名的 div / section
+    if best is None or best_score == 0:
+        for node in _walk(builder.root):
+            if isinstance(node, str) or node.tag not in ("div", "section"):
+                continue
+            hint = " ".join([node.attrs.get("class", ""),
+                             node.attrs.get("id", "")])
+            if not _CONTENT_HINT.search(hint):
+                continue
+            s = score(node)
+            if s > best_score:
+                best, best_score = node, s
+
+    # ③ 整页兜底
+    if best is None or best_score == 0:
+        for node in _walk(builder.root):
+            if not isinstance(node, str) and node.tag == "body":
+                best = node
+                break
+    if best is None:
+        return html_to_text(raw)
+
+    text = _node_text(best)
+    text = html.unescape(text)
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in text.split("\n")]
+    lines = [ln for ln in lines if ln]
+    return "\n\n".join(lines)
+
+
 # ---------------------------------------------------------------- 各格式
 
 
@@ -652,6 +794,49 @@ def load_weibo(url: str) -> Document:
     return Document(text=full, blocks=blocks, source=src, stats=stats)
 
 
+def load_xhs(url: str) -> Document:
+    """小红书笔记（图文或视频）→ Document。
+
+    图文笔记的文字在 note.desc / title / tagList 里，不需要 OCR。
+    纯图片、没有文字描述的笔记会明确说拿不到文字，而不是返回空文档。
+    """
+    from .cn_platforms import xhs_parse_note
+
+    r = xhs_parse_note(url)
+    if not r.get("ok"):
+        raise ValueError(f"小红书解析失败：{r.get('reason', '未知原因')}")
+
+    title = (r.get("title") or "").strip()
+    desc = (r.get("desc") or "").strip()
+    tags = [t for t in (r.get("tags") or []) if t]
+    parts = []
+    if title and title != desc:
+        parts.append(title)
+    if desc:
+        parts.append(desc)
+    if tags:
+        parts.append("标签：" + " ".join("#" + t for t in tags))
+    if r.get("video_url"):
+        parts.append("[含视频；视频内容用 `python3 -m ed transcript <链接>` 转逐字稿]")
+    text = "\n\n".join(parts).strip()
+    if not text:
+        raise ValueError(
+            "这条小红书笔记没有文字描述（可能是纯图片笔记）。"
+            "图文里的文字在图片上，需要先 OCR 才能蒸馏。"
+        )
+
+    src = Source(
+        kind="xiaohongshu", origin=url,
+        title=(title or desc.split("\n")[0] or "小红书笔记")[:80],
+        meta={"tags": tags, "image_count": len(r.get("images") or []),
+              "is_video": bool(r.get("video_url"))},
+    )
+    blocks = build_blocks(text, target_words=3000)
+    stats = effective_words(text)
+    stats["块数"] = len(blocks)
+    return Document(text=text, blocks=blocks, source=src, stats=stats)
+
+
 def load_url(url: str) -> Document:
     """网页/社交帖 → Document。X 帖走镜像 API（免登录），普通网页抠正文。"""
     import urllib.request
@@ -667,6 +852,9 @@ def load_url(url: str) -> Document:
                         "10_15_7) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"})
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.read().decode("utf-8", "replace")
+
+    if re.search(r"xiaohongshu\.com|xhslink\.com", url):
+        return load_xhs(url)
 
     if re.search(r"weibo\.com|weibo\.cn|weibo\.com\.cn", url):
         return load_weibo(url)
@@ -693,10 +881,11 @@ def load_url(url: str) -> Document:
         src = Source(kind="x_post", origin=url, title=title, author=author,
                      meta={"created_at": t.get("created_at", "")})
     else:
-        text = html_to_text(_get(url))
-        tm = re.search(r"<title[^>]*>(.*?)</title>", _get(url), re.S | re.I)
-        title = (tm.group(1).strip() if tm else url)[:80]
-        src = Source(kind="web", origin=url, title=title)
+        raw_html = _get(url)
+        text = extract_main_text(raw_html)
+        tm = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.S | re.I)
+        title = html.unescape(tm.group(1).strip()) if tm else url
+        src = Source(kind="web", origin=url, title=title[:80])
 
     text = re.sub(r"\n{4,}", "\n\n\n", text).strip()
     if not text:

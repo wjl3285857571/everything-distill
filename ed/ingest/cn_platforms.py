@@ -282,9 +282,22 @@ def xhs_parse_note(url: str) -> Dict[str, Any]:
     if not note:
         return {"ok": False, "reason": "__INITIAL_STATE__ 里找不到笔记数据"}
 
-    title = note.get("title") or note.get("desc") or ""
+    title = note.get("title") or ""
+    desc = note.get("desc") or ""
+    tags = [
+        str(t.get("name")).strip()
+        for t in (note.get("tagList") or [])
+        if isinstance(t, dict) and t.get("name")
+    ]
+    images = [
+        str(img.get("urlDefault") or img.get("url") or "").strip()
+        for img in (note.get("imageList") or [])
+        if isinstance(img, dict)
+    ]
     video_url = _xhs_video_url(note.get("video") or {})
-    return {"ok": True, "title": title, "video_url": video_url,
+    return {"ok": True, "title": title, "desc": desc,
+            "tags": tags, "images": [u for u in images if u],
+            "video_url": video_url,
             "is_video": bool(video_url)}
 
 
@@ -339,7 +352,8 @@ def xhs_download_audio(url: str, outdir: str,
     audio = _extract_audio(video_path, os.path.join(outdir, "xhs_audio.mp3"))
     if not audio:
         return {"ok": False, "reason": "ffmpeg 抽音频失败"}
-    return {"ok": True, "path": audio, "title": info.get("title", "")}
+    return {"ok": True, "path": audio,
+            "title": info.get("title") or (info.get("desc") or "")[:60]}
 
 
 # ---------------------------------------------------------------- 公共

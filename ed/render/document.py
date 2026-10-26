@@ -68,7 +68,8 @@ def _pick_relevant(rel: List[Dict[str, Any]], cap: int = 30) -> List[Dict[str, A
     模型倾向围着读者最显眼的处境（找工作、做项目）反复说，20 条里有 9 条
     都在讲同一件事，读起来全是回声。这里按「处境关键词」分桶，每桶最多
     2 条，其余让位给不同角度的条目；桶分不出来时（都是独特角度）按原序
-    放行。today 档全部保留——它本来就宁少勿多。
+    放行。today 优先，但**总上限是硬约束**——否则 35 条 today 会全部挤进来，
+    和文档承诺的「最多 30 条」对不上。
     """
     import re as _re
 
@@ -96,8 +97,10 @@ def _pick_relevant(rel: List[Dict[str, Any]], cap: int = 30) -> List[Dict[str, A
     bucket_count: Dict[str, int] = {}
     PER_THEME_CAP = 2
 
-    # today 优先全收（也做 insight 去重）
+    # today 优先，但仍受总上限约束
     for r in today:
+        if len(out) >= cap:
+            break
         iid = r.get("insight_id") or r.get("id")
         if iid in used_insight_ids:
             continue

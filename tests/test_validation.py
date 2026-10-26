@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -19,8 +20,8 @@ from ed.distill.stage1 import (  # noqa: E402
     anchor_hit, build_system_prompt, check_batch_receipts, normalize,
     run_stage1, verify_stage1)
 from ed.distill.stage2 import verify_stage2  # noqa: E402
-from ed.ingest.base import (Block, Document, read_docx,  # noqa: E402
-                            read_transcript_json)
+from ed.ingest.base import (Block, Document, extract_main_text,  # noqa: E402
+                            load_xhs, read_docx, read_transcript_json)
 from ed.ingest.supadata import build_request_url  # noqa: E402
 from ed.ingest.video import _fmt, vtt_to_timed_text  # noqa: E402
 from ed.orchestrate import collect, plan  # noqa: E402
@@ -268,6 +269,74 @@ class TestExcerptStrictness(unittest.TestCase):
         self.assertFalse(anchor_hit(
             "model architecture",
             "the model is large and the architecture is deep"))
+
+
+class TestWebExtraction(unittest.TestCase):
+    HTML = """<html><body>
+    <nav>首页 产品 关于我们 联系方式</nav>
+    <article>
+      <h1>一篇文章</h1>
+      <p>这是正文第一段，讲了一个非常具体的问题，以及作者最后采用的解决办法。
+         这段要足够长，才能让正文容器在打分时明显高于导航和页脚。</p>
+      <p>这是正文第二段，继续展开上一段的思路，并给出一个可操作的步骤，
+         读者照着做就能复现作者的结果。</p>
+    </article>
+    <footer>版权所有 2026 某某网站 保留所有权利</footer>
+    </body></html>"""
+
+    def test_nav_and_footer_removed(self):
+        t = extract_main_text(self.HTML)
+        self.assertIn("这是正文第一段", t)
+        self.assertNotIn("首页", t)
+        self.assertNotIn("版权所有", t)
+
+    def test_content_div_is_used_when_no_article(self):
+        html = ("<html><body><div class='post-content'>"
+                + "<p>正文内容在这里，足够长才能被当成候选容器。</p>" * 8
+                + "</div><div class='sidebar'><a href='/x'>推荐链接</a></div>"
+                "</body></html>")
+        t = extract_main_text(html)
+        self.assertIn("正文内容在这里", t)
+        self.assertNotIn("推荐链接", t)
+
+    def test_falls_back_to_whole_page(self):
+        t = extract_main_text("<html><body><p>短文本</p></body></html>")
+        self.assertIn("短文本", t)
+
+
+class TestXhsText(unittest.TestCase):
+    def test_image_note_desc_becomes_document(self):
+        info = {"ok": True, "title": "标题",
+                "desc": "这是笔记正文，讲了一个具体的方法。",
+                "tags": ["效率", "笔记"], "images": ["http://img"],
+                "video_url": ""}
+        with patch("ed.ingest.cn_platforms.xhs_parse_note", return_value=info):
+            doc = load_xhs("https://www.xiaohongshu.com/explore/abc")
+        self.assertIn("这是笔记正文", doc.text)
+        self.assertIn("#效率", doc.text)
+        self.assertEqual(doc.source.kind, "xiaohongshu")
+
+    def test_empty_image_note_raises(self):
+        info = {"ok": True, "title": "", "desc": "", "tags": [],
+                "images": ["http://img"], "video_url": ""}
+        with patch("ed.ingest.cn_platforms.xhs_parse_note", return_value=info):
+            with self.assertRaises(ValueError):
+                load_xhs("https://www.xiaohongshu.com/explore/abc")
+
+    def test_load_url_routes_xhs_to_text_loader(self):
+        from ed.ingest.base import load_url
+        with patch("ed.ingest.base.load_xhs", return_value="DOC") as m:
+            got = load_url("https://www.xiaohongshu.com/explore/abc")
+        self.assertEqual(got, "DOC")
+        m.assert_called_once()
+
+
+class TestRelevanceCap(unittest.TestCase):
+    def test_today_respects_total_cap(self):
+        from ed.render.document import _pick_relevant
+        items = [{"insight_id": f"I{i}", "horizon": "today",
+                  "why": f"item {i}"} for i in range(35)]
+        self.assertEqual(len(_pick_relevant(items, cap=30)), 30)
 
 
 class TestRunnerFactory(unittest.TestCase):
