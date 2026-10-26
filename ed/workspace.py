@@ -127,6 +127,20 @@ def load_narration(workdir: str) -> Optional[List[Dict[str, Any]]]:
     return chapters or None
 
 
+def save_brief(workdir: str, brief, report: Dict[str, Any]) -> None:
+    ensure(workdir)
+    _dump(os.path.join(workdir, "brief.json"),
+          {"brief": brief.to_dict(), "report": report})
+
+
+def load_brief(workdir: str) -> Optional[Dict[str, Any]]:
+    p = os.path.join(workdir, "brief.json")
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def load_stage2(workdir: str) -> Stage2:
     with open(os.path.join(workdir, "stage2.json"), encoding="utf-8") as f:
         d = json.load(f)

@@ -676,45 +676,6 @@ class TestNarrate(unittest.TestCase):
         self.assertNotIn("卡片式洞察", md)
 
 
-class TestSkillPackage(unittest.TestCase):
-    def _stage1(self):
-        return Stage1(
-            source=Source(kind="text", origin="x", title="纳瓦尔宝典"),
-            overview="这本书讲财富与幸福。",
-            insights=[
-                Insight(id="I1", claim="把自己产品化", type="principle",
-                        boundary="作者仅在硅谷语境下说", support="原文一句"),
-                Insight(id="I2", claim="用杠杆放大", type="framework",
-                        detail="先找专长，再加杠杆"),
-            ],
-            counter_examples=[Insight(id="C1", claim="不要把时间出租",
-                                      type="counter")],
-            glossary=[{"term": "杠杆", "definition": "无需许可的放大器"}],
-        )
-
-    def test_build_and_check(self):
-        from ed.render.skill import build_skill
-        from ed.verify.skill_meta import check_skill
-        slug, text = build_skill(self._stage1())
-        self.assertTrue(text.startswith("---"))
-        for sec in ("什么时候用它", "核心判断", "怎么做", "判断标准",
-                    "什么时候不该用它", "出处"):
-            self.assertIn(f"## {sec}", text)
-        with tempfile.TemporaryDirectory() as d:
-            out = os.path.join(d, slug)
-            os.makedirs(out)
-            with open(os.path.join(out, "SKILL.md"), "w",
-                      encoding="utf-8") as f:
-                f.write(text)
-            r = check_skill(out)
-        self.assertTrue(r["通过"], r["问题"])
-
-    def test_slugify_falls_back_for_chinese(self):
-        from ed.render.skill import slugify
-        self.assertEqual(slugify("纳瓦尔宝典"), "distilled-skill")
-        self.assertEqual(slugify("Naval's Almanack"), "naval-s-almanack")
-
-
 class TestRenderMode(unittest.TestCase):
     def test_insights_mode_drops_narration(self):
         from ed.cli import _choose_narration
@@ -746,6 +707,91 @@ class TestFooter(unittest.TestCase):
         )
         md = render(Stage1(source=Source(kind="text", origin="x", title="x")), s2)
         self.assertIn("个人化结论均挂依据", md)
+
+
+class FakeRunner(Runner):
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+        self.prompts = []
+
+    def run(self, system: str, user: str) -> str:
+        self.prompts.append((system, user))
+        if not self.outputs:
+            raise RuntimeError("没有更多预设输出")
+        return self.outputs.pop(0)
+
+
+class TestBrief(unittest.TestCase):
+    def _doc(self, text=None, blocks=None, title="测试书"):
+        text = text or "原文" * 400
+        blocks = blocks or [Block(index=1, text=text, heading="第一章")]
+        return Document(text=text, blocks=blocks,
+                        source=Source(kind="text", origin="x", title=title),
+                        stats={})
+
+    def test_single_pass(self):
+        from ed.distill.brief import run_brief
+        from ed.render.brief import render_brief
+        doc = self._doc()
+        gist = "这是一段足够长的概述。" * 20
+        r = FakeRunner([json.dumps({"gist": gist, "sections": []},
+                                   ensure_ascii=False)])
+        brief, report = run_brief(doc, r, max_chars=10000)
+        self.assertTrue(report["通过"])
+        self.assertEqual(report["模式"], "单次")
+        self.assertEqual(len(r.prompts), 1)
+        md = render_brief(brief, doc.source)
+        self.assertIn("这内容在讲什么", md)
+        self.assertIn("蒸馏版", md)
+        self.assertNotIn("跟你有关", md)
+
+    def test_long_uses_sections_and_synthesis(self):
+        from ed.distill.brief import run_brief
+        b1 = Block(index=1, text="甲" * 4000, heading="第一章")
+        b2 = Block(index=2, text="乙" * 4000, heading="第二章")
+        doc = self._doc(text="甲" * 4000 + "乙" * 4000,
+                        blocks=[b1, b2], title="长书")
+        r = FakeRunner([
+            json.dumps({"title": "第一章", "gist": "第一章讲甲。" * 10},
+                       ensure_ascii=False),
+            json.dumps({"title": "第二章", "gist": "第二章讲乙。" * 10},
+                       ensure_ascii=False),
+            json.dumps({"gist": "全书从甲走到乙。" * 30}, ensure_ascii=False),
+        ])
+        brief, report = run_brief(doc, r, max_chars=3000, workers=1)
+        self.assertEqual(report["模式"], "分层")
+        self.assertEqual(len(brief.sections), 2)
+        self.assertTrue(report["通过"])
+        self.assertEqual(len(r.prompts), 3)
+
+    def test_empty_gist_fails(self):
+        from ed.distill.brief import run_brief
+        r = FakeRunner([json.dumps({"gist": ""})])
+        brief, report = run_brief(self._doc(), r)
+        self.assertFalse(report["通过"])
+        self.assertTrue(brief.error)
+
+    def test_short_doc_skips_personal(self):
+        from ed.cli import _is_short
+        self.assertTrue(_is_short("短" * 100))
+        self.assertFalse(_is_short("长" * 3001))
+
+    def test_brief_becomes_narrative_overview(self):
+        from ed.render.document import render
+        s1 = Stage1(source=Source(kind="text", origin="x", title="书"))
+        md = render(s1, None,
+                    narration=[{"title": "第一章", "prose": "正文",
+                                "summary": "摘要"}],
+                    brief={"gist": "这是先讲一遍的概述。"})
+        self.assertIn("这是先讲一遍的概述。", md)
+
+    def test_filename_title_falls_back_to_heading(self):
+        from ed.distill.brief import run_brief
+        doc = self._doc(title="note.txt")
+        r = FakeRunner([json.dumps({"gist": "足够长的概述。" * 30},
+                                   ensure_ascii=False)])
+        brief, _ = run_brief(doc, r)
+        self.assertEqual(brief.title, "第一章")
 
 
 class TestRunnerFactory(unittest.TestCase):

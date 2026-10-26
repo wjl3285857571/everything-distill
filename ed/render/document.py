@@ -174,6 +174,7 @@ def render(
     source_note: str = "",
     depth_note: str = "",
     narration: Optional[List[Dict[str, Any]]] = None,
+    brief: Optional[Dict[str, Any]] = None,
 ) -> str:
     """生成最终 Markdown 文档。"""
     L: List[str] = []
@@ -236,9 +237,12 @@ def render(
     # ---------- 一、概览 ----------
     L.append(f"## {CN[num['overview']-1]}、这内容在讲什么")
     L.append("")
-    # 第二段的概览能看到全部洞察，比第一段单批的更准，优先用它
+    # 第二段的概览能看到全部洞察，比第一段单批的更准，优先用它；
+    # 但「先讲一遍」的 brief 是最完整的一遍通读，优先级最高。
     overview = ""
-    if stage2 and getattr(stage2, "overview", ""):
+    if brief and str(brief.get("gist") or "").strip():
+        overview = str(brief["gist"]).strip()
+    if not overview and stage2 and getattr(stage2, "overview", ""):
         overview = stage2.overview
     if not overview:
         if narration:

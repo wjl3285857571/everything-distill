@@ -8,19 +8,14 @@
 
 ## 这是什么
 
-**everything-distill** 是一个把「任何内容」蒸馏成「一份你能看懂、且与你相关的理解文档」的确定性管线。
+**everything-distill** 是一个把「任何内容」蒸馏成「一份你能看懂的理解文档」的确定性管线；需要时再挂上「跟你有关」。
 
-不管输入是一本书、一篇论文、一个视频链接（B 站 / YouTube / 抖音 / 小红书）、一期播客、一条推文、一个网页，还是一份本地音视频文件——它都会产出**同一结构**的 Markdown 文档：
+不管输入是一本书、一篇论文、一个视频链接（B 站 / YouTube / 抖音 / 小红书）、一期播客、一条推文、一个网页，还是一份本地音视频文件——它都会产出 Markdown：
 
-```
-一、这内容在讲什么        ← 30 秒概览
-二、怎么切进去            ← 初次理解的建议（1-3 条）
-三、内容本身              ← 结构 / 关键洞察 / 失效场景 / 专有名词（主体）
-四、跟你有关              ← 眼下能用得上 / 值得想 / 存着，三档，封顶 30 条
-依据                      ← 论文式编号引用，正文 [1] 可跳转
-```
+- **蒸馏版（默认）**：开头先讲清「这内容在讲什么」，再按章把内容讲透；短内容（少于 3000 字）只保留概述，不做个人关联。
+- **洞察版（给 AI）**：结构表 + 关键洞察（说法 / 边界 / 原文 / 位置 / ID），适合整篇丢给 AI，让它基于证据跟你讨论。
 
-它不做摘要机器。它的目标是：**读完这一份文档，你不用再去读原著，且每一条结论都能回溯到原文。**
+它不做摘要机器。它的目标是：**读完蒸馏版，你能说出它讲了什么、怎么展开的；需要逐条核对时，看洞察版和原文依据。**
 
 ## 核心设计原则
 
@@ -28,10 +23,11 @@
 
 不部署任何本地模型，不要求任何平台登录态。本地代码只负责：下载（yt-dlp / ffmpeg）、清洗、校验、渲染。「听」（语音转写）交给云端 ASR，「懂」（理解与蒸馏）交给会话里的模型。
 
-### 2. 两段式蒸馏，处境不污染内容
+### 2. 先讲一遍，再做两段式
 
+- **先讲一遍（brief）**：不管什么输入，先让模型把「这是什么、讲了什么、怎么展开」讲成连贯中文，作为蒸馏版的开头；长内容再逐章讲透
 - **第一段（无处境）**：纯粹按内容本身的重要性提炼，不掺任何用户信息——避免「因为他正在求职就只看到求职相关内容」的取样偏差
-- **第二段（有处境）**：拿着第一段结果 + 读者画像做匹配重组——因为读了内容再套处境，不会硬凑关联
+- **第二段（有处境）**：拿着第一段结果 + 读者画像做匹配重组——因为读了内容再套处境，不会硬凑关联；短内容直接跳过这一步
 
 ### 3. 硬校验，不信模型的自述
 
@@ -40,6 +36,7 @@
 | 校验 | 机制 |
 |---|---|
 | 摘录真实性 | 每条洞察必须附原文逐字摘录，程序回原文做整段归一化比对；对不上整条作废，作废超过 30% 判失败 |
+| 概述不越界 | `brief` 只喂原文、要求不补外部信息；正文里出现原文没有的书名会标成「外部引用」；空概述或过短判失败。概述是转述，不做逐字校验，引用前要回原文核对 |
 | 归属正确性 | 摘录定位不到声明的块时，按摘录在原文中的真实位置重算并记录（不阻断） |
 | 回执一致性 | 每块的回执条数必须等于实际条目数（只数 insights，或 insights+反例，两种口径都接受）；缺回执、数量不符、批次失败都算未完成 |
 | 关联挂依据 | 「跟你有关」的每条都挂依据编号，引文会回贴到记忆 / 会话 / 原文里的真实句子；贴不上的依据连同它支撑的关联一起作废 |
@@ -123,24 +120,31 @@ python3 -m ed collect --workdir runs/my-video
 python3 -m ed stage2-prompt --workdir runs/my-video --out _stage2_prompt.txt
 #   → 第二段 prompt 交给模型，产出写 _stage2.out
 python3 -m ed collect2 --workdir runs/my-video
-python3 -m ed render --workdir runs/my-video --out 蒸馏理解.md
+python3 -m ed render --workdir runs/my-video --out 蒸馏版.md
 ```
 
 ### 蒸馏一本书
 
 ```bash
+# 一条命令：先讲一遍 → 逐章讲透 → 蒸馏版
+python3 -m ed run 书.epub --workdir runs/书名 --out 书名-蒸馏版.md
+
+# 想同时要一份给 AI 的洞察版
+python3 -m ed run 书.epub --workdir runs/书名 --out 书名-蒸馏版.md --deep
+
+# 也可以分步
 python3 -m ed ingest 书.epub --workdir runs/书名
-python3 -m ed plan --workdir runs/书名
-
-# 逐章讲述：把书讲成连贯长文（书 / 长文推荐走这条）
-python3 -m ed narrate --workdir runs/书名
-
-# ... 第一段、第二段同上
-python3 -m ed render --workdir runs/书名 --out 书名-讲述版.md
-
-# 给 AI 用的技能包（可以和讲述版都出）
-python3 -m ed package --workdir runs/书名 --out runs/书名/技能包 --name book-skill
+python3 -m ed brief  --workdir runs/书名 --out 书名-蒸馏版.md   # 先讲一遍
+python3 -m ed narrate --workdir runs/书名                      # 逐章讲透
+python3 -m ed render --workdir runs/书名 --mode narrative --out 书名-蒸馏版.md
 ```
+
+`brief` 先让模型把「这是什么、讲了什么、怎么展开的」讲一遍，600–1200 字；
+长内容再走 `narrate`，这段概述会成为正文第一节。短内容（少于 3000 字）只出概述，
+不做逐章讲述，也不做个人关联——几百字的东西硬扯「跟你有关」只会显得牵强。
+
+长书的 `brief` 会按章分批，每批一次模型调用（默认最多 2 路并发），耗时随章节数增长；
+不要把它当成秒级操作。
 
 `narrate` 按章节分组，每部分让模型写 1200–2500 字连贯正文。产物里**不会**再出现
 「200 条洞察卡片」——那种形态适合做知识库，不适合人读。
@@ -152,35 +156,35 @@ python3 -m ed metadata "https://youtu.be/xxxx"        # 标题/作者/章节
 python3 -m ed frames "https://youtu.be/xxxx" --at 00:12:30 --scene   # 局部抽帧
 ```
 
-### 三种产物形态
+### 两种产物形态
 
-同一份内容可以出三种文档，按用途选：
+同一份内容可以出两种文档，按用途选：
 
 | 形态 | 怎么出 | 正文长什么样 | 适合 |
 |---|---|---|---|
-| **讲述版** | `narrate` + `render` | 按章分节，每节 1200–2500 字连贯正文，关键处引原文 | 你自己读，想被讲透 |
-| **洞察版** | `stage1`/`stage2` + `render --mode insights` | 结构表 + 关键洞察（说法、边界、原文、位置、ID） | 拿给 AI 帮你理解、做知识库 |
-| **技能包** | `package` | 六段 SKILL.md | 给 agent 直接调用（可选；会压掉推理和原文） |
+| **蒸馏版**（默认） | `run` / `brief` + `narrate` | 开头是「这内容在讲什么」的概述，后面按章讲透；短内容只有概述 | 你自己读 |
+| **洞察版**（给 AI） | `stage1`/`stage2` + `render --mode insights` | 结构表 + 关键洞察（说法、边界、原文、位置、ID） | 拿给 AI 帮你理解、做知识库 |
 
 **触发方式**（对人说，也对 AI 说）：
 
-- 「讲给我听」「我想读懂」「蒸给我看」→ 讲述版
+- 什么都不说，或「讲给我听」「我想读懂」「蒸给我看」→ 蒸馏版
 - 「蒸给 AI」「拿给 AI 看」「帮我理解」→ 洞察版
-- 「做成 skill / 给 agent 用」→ 技能包（可选，表达力有限）
-- 没说清楚：书和长文默认讲述版，短内容默认洞察版
+
+文件名也照这个来：`书名-蒸馏版.md`、`书名-洞察版.md`，不要再用「讲述版」这个后缀。
 
 同一个工作区两种都能出：`render --mode narrative` / `--mode insights`，默认 `auto`
-（有讲述稿就用讲述稿）。洞察版是证据密度最高的形态——每条都带原文和位置，
-适合整篇丢给 AI 让它基于证据跟你讨论；技能包只是把结论压成指令，推理和出处都丢了。
+（有概述就用概述）。洞察版是证据密度最高的形态——每条都带原文和位置，
+适合整篇丢给 AI 让它基于证据跟你讨论。
 
-小说和名著请用讲述版。洞察版会把人物和情节压成「原则/案例」，那是把小说讲坏。
+小说和名著请用蒸馏版。洞察版会把人物和情节压成「原则/案例」，那是把小说讲坏。
 
-讲述版也会防模型乱补：引用必须逐字对得上原文；正文里出现原文没有的书名，会被记成
+蒸馏版也会防模型乱补：引用必须逐字对得上原文；正文里出现原文没有的书名，会被记成
 「外部引用」写进校验报告（提示模型可能拿外部知识套了这本书）。
 
-**讲述版默认不做个人关联。** 想加「跟你有关」，再跑 `stage2` 后重新 `render` 即可。
-小说尤其不建议加：把人物和情节硬读成你的处境，会把书讲坏。关联宁缺毋滥——
-`stage2` 本身也要求「找不到有依据的关联就不写」，`relevant` 允许为空。
+**蒸馏版默认不做个人关联。** 想加「跟你有关」，再跑 `stage2` 后
+`render --mode narrative`。短内容会自动跳过个人关联；小说尤其不建议加：
+把人物和情节硬读成你的处境，会把书讲坏。关联宁缺毋滥——`stage2` 本身也要求
+「找不到有依据的关联就不写」，`relevant` 允许为空。
 
 ### 校验没过时会怎样
 
@@ -218,7 +222,7 @@ python3 -m ed frames "https://youtu.be/xxxx" --at 00:12:30 --cookies
 ```
 ed/
   __main__.py          CLI 入口
-  cli.py               命令定义（transcript/ingest/plan/collect/render/...）
+  cli.py               命令定义（transcript/ingest/brief/narrate/render/...）
   schema.py            数据模型（Insight / Stage1 / Stage2 / Basis）
   config.py            项目路径与 .env 查找
   workspace.py         工作区读写
@@ -236,17 +240,16 @@ ed/
     frames.py          Level 3 按需抽帧（场景检测）
   distill/
     stage1.py          第一段：内容蒸馏（批处理 / 回执 / 校验）
+    brief.py           先讲一遍：概述（长文分层 + 合成）
     narrate.py         逐章讲述：按章写连贯长文，不是卡片
     stage2.py          第二段：结合读者处境
     horizon.py         「时间距离」分档（增量补标）
     select.py          机械筛选（轮转采样）
   render/
     document.py        最终文档渲染（分档 / 依据 / 去重）
-    skill.py           打包成 AI 可调用的 SKILL.md
-  verify/
-    skill_meta.py      产物元信息校验
-templates/             第一段/第二段的 prompt 模板 + narrate_system.md
-tests/                 125 项回归测试
+    brief.py           蒸馏版渲染
+templates/             第一段/第二段的 prompt + brief_*.md + narrate_system.md
+tests/                 132 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -466,45 +469,52 @@ python3 -m ed render --workdir runs/my-video --out distilled.md
 ### Distill a book
 
 ```bash
+# one command: gist → chapter-by-chapter → distilled edition
+python3 -m ed run book.epub --workdir runs/book --out book-distilled.md
+
+# also produce the AI-facing insights edition
+python3 -m ed run book.epub --workdir runs/book --out book-distilled.md --deep
+
+# or step by step
 python3 -m ed ingest book.epub --workdir runs/book
-python3 -m ed plan --workdir runs/book
-
-# chapter-by-chapter narration: a continuous long-form explanation
+python3 -m ed brief  --workdir runs/book --out book-distilled.md
 python3 -m ed narrate --workdir runs/book
-
-# ... stage 1 / stage 2 as above
-python3 -m ed render --workdir runs/book --out book-narrative.md
-
-# AI-facing skill package (can be produced alongside the narrative)
-python3 -m ed package --workdir runs/book --out runs/book/skills --name book-skill
+python3 -m ed render --workdir runs/book --mode narrative --out book-distilled.md
 ```
+
+`brief` asks the model to explain what the content is, what it says, and how it unfolds
+(600–1200 characters). For long content, `narrate` then writes 1200–2500 characters per
+chapter, and the brief becomes the opening section. Content under 3,000 characters gets the
+brief only — no chapter pass and no personal relevance.
 
 `narrate` groups blocks by chapter and asks for 1200–2500 characters of connected prose per
 part. The output **no longer** contains a 200-item insight-card list — that shape suits a
 knowledge base, not a person reading.
 
-### Three output shapes
+### Two output shapes
 
 | Shape | How | Body | Best for |
 |---|---|---|---|
-| **Narrative** | `narrate` + `render` | Chapter sections, 1200–2500 characters of prose each, key quotes inline | You, reading it |
-| **Insights** | `stage1`/`stage2` + `render --mode insights` | Structure table + insight list (claim, boundary, quote, location, ID) | Handing to an AI to help you understand; knowledge base |
-| **Skill package** | `package` | Six-section SKILL.md | An agent executing it (optional; drops the reasoning and quotes) |
+| **Distilled** (default) | `run` / `brief` + `narrate` | Opening overview, then chapter-by-chapter prose; short content is overview only | You, reading it |
+| **Insights** (for AI) | `stage1`/`stage2` + `render --mode insights` | Structure table + insight list (claim, boundary, quote, location, ID) | Handing to an AI to help you understand; knowledge base |
 
 Trigger phrases (for humans and agents):
 
-- "explain it to me" / "I want to understand it" → narrative
-- "distill for AI" / "show it to an AI" → insights
-- "make it a skill" / "for an agent" → skill package (optional, low expressiveness)
-- unspecified: books and long reads default to narrative; short content defaults to insights
+- nothing, or "explain it to me" / "I want to understand it" → distilled edition
+- "distill for AI" / "show it to an AI" → insights edition
+
+File names follow the same rule: `book-distilled.md`, `book-insights.md`; do not use
+"narrative" as a filename suffix.
 
 Both can come out of one workspace: `render --mode narrative` / `--mode insights`; the default
-`auto` uses the narrative when one exists. The insights edition is the densest form — every
-entry carries its source quote and location, so it can be handed to an AI whole; the skill
-package compresses judgments into instructions and loses the reasoning and citations.
+`auto` uses the brief when one exists. The insights edition is the densest form — every entry
+carries its source quote and location, so it can be handed to an AI whole.
 
-Use narrative for fiction and classics. The insights shape compresses characters and plot into
-"principles/cases", which ruins a novel.
+Use the distilled edition for fiction and classics. The insights shape compresses characters
+and plot into "principles/cases", which ruins a novel.
+
+The distilled edition does no personal relevance by default; run `stage2` then
+`render --mode narrative` to add it. Short content skips it automatically.
 
 ### When validation fails
 

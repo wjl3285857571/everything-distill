@@ -2,6 +2,8 @@
 命令行入口。
 
     ed ingest   <输入> --workdir <目录>        只做转换与切块
+    ed brief   --workdir <目录> --out <md>    先讲一遍（默认产物：蒸馏版）
+    ed narrate --workdir <目录>               逐章讲透（长内容）
     ed stage1  --workdir <目录>               第一段：内容蒸馏（无处境）
     ed stage2  --workdir <目录>               第二段：结合处境匹配
     ed render  --workdir <目录> --out <md>    生成最终文档
@@ -19,6 +21,7 @@ import sys
 from typing import List, Optional
 
 from . import workspace
+from .config import SHORT_DOC_CHARS
 from .context.profile import Context
 from .distill.stage1 import run_stage1, verify_stage1
 from .distill.stage2 import run_stage2, snap_basis_to_sources, verify_stage2
@@ -115,8 +118,14 @@ def cmd_stage1(args) -> int:
 
 
 def cmd_stage2(args) -> int:
-    stage1 = workspace.load_stage1(args.workdir)
     doc = workspace.load_document(args.workdir)
+    if _is_short(doc.text) and not getattr(args, "force_personal", False):
+        p2 = os.path.join(args.workdir, "stage2.json")
+        if os.path.exists(p2):
+            os.remove(p2)
+        print(f"内容较短（{len(doc.text):,} 字），跳过个人关联。")
+        return 0
+    stage1 = workspace.load_stage1(args.workdir)
     ctx = load_context(args)
     runner = make_runner(args)
     print(f"第二段：处境 {ctx.summary()}")
@@ -195,6 +204,11 @@ def _workdir_failures(workdir: str, mem_dir: str) -> List[str]:
     return out
 
 
+def _is_short(text: str) -> bool:
+    """短内容不做个人关联。"""
+    return len(text) < SHORT_DOC_CHARS
+
+
 def _choose_narration(mode: str, narration):
     """按 --mode 决定用不用讲述稿。"""
     if mode == "insights":
@@ -207,6 +221,28 @@ def _choose_narration(mode: str, narration):
 def cmd_render(args) -> int:
     p1 = os.path.join(args.workdir, "stage1.json")
     mode = getattr(args, "mode", "auto")
+    brief_raw = workspace.load_brief(args.workdir)
+    narration_raw = workspace.load_narration(args.workdir)
+    if mode == "brief" or (mode == "auto" and brief_raw and not narration_raw):
+        if not brief_raw:
+            print("✘ 没有 brief.json，先跑 ed brief", file=sys.stderr)
+            return 2
+        from .distill.brief import Brief, BriefSection
+        from .render.brief import render_brief
+        b = brief_raw.get("brief") or {}
+        brief = Brief(
+            title=b.get("title", ""),
+            gist=b.get("gist", ""),
+            sections=[BriefSection(**s) for s in b.get("sections", [])],
+            external_refs=b.get("external_refs", []),
+            error=b.get("error", ""),
+        )
+        source = workspace.load_document(args.workdir).source
+        md = render_brief(brief, source)
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(md)
+        print(f"✓ {args.out} （{len(md):,} 字符）")
+        return 0
     if mode == "insights" and not os.path.exists(p1):
         print("✘ 洞察版需要 stage1.json，先跑 ed stage1", file=sys.stderr)
         return 2
@@ -231,14 +267,15 @@ def cmd_render(args) -> int:
         return 2
 
     depth_note = DEPTH_HINT.get(args.depth, "")
-    narration = workspace.load_narration(args.workdir)
+    narration = narration_raw
     try:
         narration = _choose_narration(mode, narration)
     except ValueError as e:
         print(f"✘ {e}", file=sys.stderr)
         return 2
     md = render(stage1, stage2, title=args.title, source_note=args.source_note,
-                depth_note=depth_note, narration=narration)
+                depth_note=depth_note, narration=narration,
+                brief=((brief_raw or {}).get("brief") if narration else None))
     if failures:
         md = ("> ⚠ **校验未通过**：" + "；".join(failures)
               + "\n>\n> 下面的内容可能不完整或缺少依据，别当成可信成品。\n\n" + md)
@@ -449,19 +486,6 @@ def cmd_frames(args) -> int:
     return 0
 
 
-def cmd_check_skill(args) -> int:
-    from .verify.skill_meta import check_skill
-    r = check_skill(args.path, kind=args.kind)
-    flag = "✔" if r["通过"] else "✘"
-    print(f"{flag} {r['目录']}（{r['形态']}形态）"
-          f" description {r.get('description_字数', '?')} 字")
-    if r.get("说明"):
-        print(f"  {r['说明']}")
-    for p in r["问题"]:
-        print(f"  ⚠ {p}")
-    return 0 if r["通过"] else 2
-
-
 def cmd_narrate(args) -> int:
     from .distill.narrate import run_narrate
     doc = workspace.load_document(args.workdir)
@@ -480,41 +504,74 @@ def cmd_narrate(args) -> int:
     return 0 if report["通过"] else 2
 
 
-def cmd_package(args) -> int:
-    from .render.skill import build_skill
-    from .verify.skill_meta import check_skill
-    stage1 = workspace.load_stage1(args.workdir)
-    slug, text = build_skill(stage1, name=args.name)
-    outdir = os.path.join(args.out, slug)
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, "SKILL.md")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    r = check_skill(outdir)
-    print(f"✓ {path} （{len(text):,} 字符，"
-          f"description {r.get('description_字数', '?')} 字）")
-    if r["通过"]:
-        print("  ✓ 六段结构与 front matter 通过")
-        return 0
-    for p in r["问题"]:
-        print(f"  ⚠ {p}")
-    return 2
+def cmd_brief(args) -> int:
+    from .distill.brief import run_brief
+    from .render.brief import render_brief
+    doc = workspace.load_document(args.workdir)
+    runner = make_runner(args)
+    print(f"先讲一遍：{len(doc.blocks)} 块，{len(doc.text):,} 字")
+    brief, report = run_brief(
+        doc, runner,
+        max_chars=getattr(args, "max_chars", 14000),
+        workers=max(1, min(args.workers, 2)),
+        progress=lambda m: print("  " + m, flush=True))
+    workspace.save_brief(args.workdir, brief, report)
+    md = render_brief(brief, doc.source)
+    with open(args.out, "w", encoding="utf-8") as f:
+        f.write(md)
+    print(f"\n模式 {report['模式']} ｜ 部分 {report['部分数']} ｜ "
+          f"失败 {report['失败']} ｜ {report['总字数']:,} 字")
+    if brief.error:
+        print(f"  ✘ {brief.error}")
+    for s in brief.sections:
+        if s.error:
+            print(f"  ✘ {s.title}：{s.error}")
+    print(f"→ {args.out}")
+    return 0 if report["通过"] else 2
 
 
 def cmd_run(args) -> int:
     rc = cmd_ingest(args)
     if rc:
         return rc
+
+    # 1) 先讲一遍：不管输入是什么，先让模型把大致内容讲出来
+    rc = cmd_brief(args)
+    if rc:
+        return rc
+
+    doc = workspace.load_document(args.workdir)
+    if not _is_short(doc.text):
+        # 2) 长内容：逐章讲透，brief 作为开头那一节
+        rc = cmd_narrate(args)
+        if rc and not getattr(args, "allow_failed", False):
+            print("✘ 逐章讲述有部分失败，已停止；仅概述的蒸馏版已保留",
+                  file=sys.stderr)
+            return rc
+        if rc:
+            print("⚠ 逐章讲述有部分失败，仍继续渲染（文档会带警告）")
+        setattr(args, "mode", "narrative")
+        rc = cmd_render(args)
+        if rc:
+            return rc
+    else:
+        print("内容较短：只出蒸馏版，不做逐章讲述，也不做个人关联。")
+
+    # 3) 可选：再出一份洞察版（给 AI 用）
+    if not getattr(args, "deep", False):
+        return 0
     rc = cmd_stage1(args)
     if rc:
         return rc
     rc = cmd_stage2(args)
-    if rc:
-        if not getattr(args, "allow_failed", False):
-            print("✘ 第二段没过校验，已停止（加 --allow-failed 可强行渲染）",
-                  file=sys.stderr)
-            return rc
-        print("⚠ 第二段没过校验，仍继续渲染（文档会带警告）")
+    if rc and not getattr(args, "allow_failed", False):
+        print("✘ 第二段没过校验，已停止（加 --allow-failed 可强行渲染）",
+              file=sys.stderr)
+        return rc
+    insights_out = (args.out[:-3] + "-洞察版.md"
+                    if args.out.endswith(".md") else args.out + "-洞察版.md")
+    args.out = insights_out
+    setattr(args, "mode", "insights")
     return cmd_render(args)
 
 
@@ -544,18 +601,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     common(p)
     p.set_defaults(func=cmd_stage1)
 
+    p = sub.add_parser("brief", help="先把内容大致讲一遍（默认产物：蒸馏版）")
+    p.add_argument("--workdir", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--max-chars", type=int, default=14000,
+                   help="单次喂给模型的最大字数；超过就分层")
+    common(p)
+    p.set_defaults(func=cmd_brief)
+
     p = sub.add_parser("narrate", help="逐章讲述：把内容讲成连贯长文")
     p.add_argument("--workdir", required=True)
     common(p)
     p.set_defaults(func=cmd_narrate)
-
-    p = sub.add_parser("package", help="打包成 AI 可调用的 SKILL.md")
-    p.add_argument("--workdir", required=True)
-    p.add_argument("--out", required=True,
-                   help="输出目录（下面会建 <name>/SKILL.md）")
-    p.add_argument("--name", default=None,
-                   help="技能名：小写英文/数字 + 连字符")
-    p.set_defaults(func=cmd_package)
 
     p = sub.add_parser("stage2", help="第二段：结合处境")
     p.add_argument("--workdir", required=True)
@@ -564,6 +621,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="纳入哪些记忆文件，默认 USER.md PROJECTS.md")
     p.add_argument("--sessions", default=None,
                    help="按需检索到的会话片段（JSON 文件）")
+    p.add_argument("--force-personal", action="store_true",
+                   help="内容很短也强行做个人关联")
     common(p)
     p.set_defaults(func=cmd_stage2)
 
@@ -571,8 +630,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--workdir", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--mode", default="auto",
-                   choices=["auto", "narrative", "insights"],
-                   help="auto=有讲述用讲述；narrative=强制讲述；insights=强制洞察版")
+                   choices=["auto", "brief", "narrative", "insights"],
+                   help="auto=有概述用概述；brief=蒸馏版；narrative=逐章讲透；insights=洞察版")
     p.add_argument("--title", default="")
     p.add_argument("--source-note", default="")
     p.add_argument("--depth", default="standard", choices=list(DEPTH_HINT))
@@ -655,12 +714,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="允许读取 Hermes 浏览器 profile 的 cookie（默认不用）")
     p.set_defaults(func=cmd_frames)
 
-    p = sub.add_parser("check-skill", help="检查一个 skill 的元信息合规性")
-    p.add_argument("path", help="skill 目录")
-    p.add_argument("--kind", default="package", choices=["manual", "package"],
-                   help="manual=编排手册形态；package=AI 可调用的技能包形态")
-    p.set_defaults(func=cmd_check_skill)
-
     p = sub.add_parser("run", help="全流程")
     p.add_argument("input")
     p.add_argument("--workdir", required=True)
@@ -673,6 +726,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--sessions", default=None)
     p.add_argument("--allow-failed", action="store_true",
                    help="校验未通过也继续/生成（文档会带警告）")
+    p.add_argument("--deep", action="store_true",
+                   help="在蒸馏版之后继续跑洞察版（两份都留）")
+    p.add_argument("--max-chars", type=int, default=14000)
+    p.add_argument("--max-insights", type=int, default=200,
+                   help="第一段最多保留多少条洞察（--deep 时用）")
+    p.add_argument("--force-personal", action="store_true",
+                   help="内容很短也强行做个人关联")
     common(p)
     p.set_defaults(func=cmd_run)
 

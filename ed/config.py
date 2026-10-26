@@ -23,6 +23,10 @@ def project_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# 短内容不做个人关联：几百字的网页/短帖，硬扯「跟你有关」只会显得牵强。
+SHORT_DOC_CHARS = 3000
+
+
 def env_file_candidates() -> List[str]:
     """按优先级返回可能存在的 .env 路径（去重保序）。"""
     paths: List[str] = []

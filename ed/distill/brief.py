@@ -1,0 +1,208 @@
+"""先把内容大致讲一遍。
+
+这是默认产物：不管输入是书、论文、网页还是视频，先让模型把「这是什么、
+讲了什么、怎么展开的」用连贯中文讲一遍，而不是直接抽成洞察卡片。
+
+和 narrate 的分工：
+    brief   —— 先讲一遍，600–1200 字，给人一个整体印象；
+    narrate —— 逐章讲透，每部分 1200–2500 字，给想细读的人。
+
+长文走两层：先按章节各写一段概述，再把概述合成全局概述。这样不会因为
+一次塞不下而只讲开头。
+"""
+
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+from ..ingest.base import Document
+from ..runner import Runner, parse_json_loose
+from .narrate import group_blocks, load_template
+
+MIN_GIST_CHARS = 120
+SINGLE_PASS_LIMIT = 14_000
+
+
+@dataclass
+class BriefSection:
+    title: str
+    gist: str = ""
+    blocks: List[int] = field(default_factory=list)
+    error: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {"title": self.title, "gist": self.gist, "blocks": self.blocks}
+        if self.error:
+            d["error"] = self.error
+        return d
+
+
+@dataclass
+class Brief:
+    title: str
+    gist: str = ""
+    sections: List[BriefSection] = field(default_factory=list)
+    external_refs: List[str] = field(default_factory=list)
+    error: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {
+            "title": self.title,
+            "gist": self.gist,
+            "sections": [s.to_dict() for s in self.sections],
+        }
+        if self.external_refs:
+            d["external_refs"] = self.external_refs
+        if self.error:
+            d["error"] = self.error
+        return d
+
+
+def _blocks_text(blocks: List) -> str:
+    out: List[str] = []
+    for b in blocks:
+        if b.heading:
+            out.append(f"[小节：{b.heading}]")
+        out.append(b.text)
+        out.append("")
+    return "\n".join(out)
+
+
+def _meta(doc: Document) -> str:
+    lines = []
+    if doc.source.title:
+        lines.append(f"标题：{doc.source.title}")
+    if doc.source.author:
+        lines.append(f"作者：{doc.source.author}")
+    if doc.source.kind:
+        lines.append(f"类型：{doc.source.kind}")
+    return "\n".join(lines)
+
+
+def _user_prompt(doc: Document, blocks: List, part: bool = False) -> str:
+    scope = "这一部分" if part else "全部内容"
+    return (f"## 范围\n\n{_meta(doc)}\n\n{scope}，共 {len(blocks)} 段，"
+            f"{sum(len(b.text) for b in blocks):,} 字。\n\n"
+            f"## 原文\n\n{_blocks_text(blocks)}")
+
+
+def _synthesis_prompt(doc: Document, sections: List[BriefSection]) -> str:
+    parts = [f"## 各部分的概述\n\n{_meta(doc)}\n"]
+    for i, s in enumerate(sections, 1):
+        parts.append(f"### {i}. {s.title}\n\n{s.gist}\n")
+    return "\n".join(parts)
+
+
+def _clean(text: Any) -> str:
+    s = str(text or "").strip()
+    s = re.sub(r"<<<块\s*\d+>>>", "", s)
+    s = re.sub(r"(?m)^#{1,6}\s*", "", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+def _refs(gist: str, source_text: str, title: str) -> List[str]:
+    found = []
+    for name in sorted(set(re.findall(r"《([^》]{1,30})》", gist))):
+        if name in source_text or name in (title or ""):
+            continue
+        found.append(name)
+    return found
+
+
+def _section(data: Dict[str, Any], blocks: List) -> BriefSection:
+    title = str(data.get("title") or blocks[0].heading or "正文").strip()
+    if len(title) > 24:
+        title = title[:22].rstrip("，、·—- ") + "…"
+    gist = _clean(data.get("gist"))
+    s = BriefSection(title=title, gist=gist,
+                     blocks=[b.index for b in blocks])
+    if not gist:
+        s.error = "模型没有返回 gist"
+    return s
+
+
+def run_brief(doc: Document, runner: Runner, max_chars: int = SINGLE_PASS_LIMIT,
+              workers: int = 2, progress=None) -> Tuple[Brief, Dict[str, Any]]:
+    title = doc.source.title or (doc.blocks[0].heading if doc.blocks else "") or "这份内容"
+    if (title.lower().endswith((".txt", ".md", ".pdf", ".epub", ".docx",
+                                ".html", ".htm"))
+            and doc.blocks and doc.blocks[0].heading):
+        title = doc.blocks[0].heading
+    total = len(doc.text)
+    sections: List[BriefSection] = []
+    failed = 0
+    mode = "单次" if total <= max_chars else "分层"
+
+    if mode == "单次":
+        raw = runner.run(load_template("brief_system.md"),
+                         _user_prompt(doc, doc.blocks))
+        data = parse_json_loose(raw)
+        gist = _clean(data.get("gist"))
+        for item in data.get("sections") or []:
+            if isinstance(item, dict) and item.get("gist"):
+                sections.append(BriefSection(
+                    title=str(item.get("title") or "正文").strip(),
+                    gist=_clean(item.get("gist"))))
+    else:
+        groups = group_blocks(doc, min_chars=3000, max_chars=max_chars)
+        results: List[Optional[BriefSection]] = [None] * len(groups)
+        lock = threading.Lock()
+        done = [0]
+
+        def work(item):
+            i, blocks = item
+            try:
+                raw = runner.run(load_template("brief_section.md"),
+                                 _user_prompt(doc, blocks, part=True))
+                s = _section(parse_json_loose(raw), blocks)
+            except Exception as e:
+                s = BriefSection(
+                    title=(blocks[0].heading or f"第 {i + 1} 部分"),
+                    blocks=[b.index for b in blocks],
+                    error=str(e)[:200])
+            with lock:
+                done[0] += 1
+                if progress:
+                    mark = "✘" if s.error else "✔"
+                    progress(f"{mark} 第 {done[0]}/{len(groups)} 部分"
+                             f"（块 {blocks[0].index}–{blocks[-1].index}）")
+            return s
+
+        if workers <= 1:
+            for i, g in enumerate(groups):
+                results[i] = work((i, g))
+        else:
+            with ThreadPoolExecutor(max_workers=min(workers, len(groups))) as ex:
+                results = list(ex.map(work, list(enumerate(groups))))
+
+        sections = [s for s in results if s is not None]
+        failed = sum(1 for s in sections if s.error)
+        good = [s for s in sections if not s.error]
+        if good:
+            raw = runner.run(load_template("brief_synthesis.md"),
+                             _synthesis_prompt(doc, good))
+            gist = _clean(parse_json_loose(raw).get("gist"))
+        else:
+            gist = ""
+
+    brief = Brief(title=title, gist=gist, sections=sections)
+    if not gist:
+        brief.error = "模型没有返回概述"
+    elif len(gist) < MIN_GIST_CHARS:
+        brief.error = f"概述过短（{len(gist)} 字）"
+    brief.external_refs = _refs(
+        gist + "\n" + "\n".join(s.gist for s in sections), doc.text, title)
+
+    report = {
+        "模式": mode,
+        "部分数": len(sections),
+        "成功": sum(1 for s in sections if s.gist and not s.error),
+        "失败": failed,
+        "总字数": len(gist) + sum(len(s.gist) for s in sections),
+        "外部引用": len(brief.external_refs),
+        "通过": not brief.error and failed == 0,
+    }
+    return brief, report
