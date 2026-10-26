@@ -339,6 +339,94 @@ class TestXhsText(unittest.TestCase):
         m.assert_called_once()
 
 
+class TestPdfLayout(unittest.TestCase):
+    @staticmethod
+    def _line(text, x0, y0, x1, y1):
+        return {"text": text, "bbox": [x0, y0, x1, y1]}
+
+    @staticmethod
+    def _page(blocks, w=600, h=800):
+        return {"width": w, "height": h, "blocks": blocks}
+
+    def test_two_column_reading_order(self):
+        from ed.ingest.base import _order_page_blocks
+        page = self._page([
+            {"lines": [self._line("Title", 50, 40, 550, 60)],
+             "bbox": [50, 40, 550, 60]},
+            {"lines": [self._line("L1", 50, 100, 280, 120)],
+             "bbox": [50, 100, 280, 120]},
+            {"lines": [self._line("L2", 50, 140, 280, 160)],
+             "bbox": [50, 140, 280, 160]},
+            {"lines": [self._line("R1", 320, 100, 550, 120)],
+             "bbox": [320, 100, 550, 120]},
+            {"lines": [self._line("R2", 320, 140, 550, 160)],
+             "bbox": [320, 140, 550, 160]},
+        ])
+        order = [b["lines"][0]["text"] for b in _order_page_blocks(page)]
+        self.assertEqual(order, ["Title", "L1", "L2", "R1", "R2"])
+
+    def test_repeated_header_and_page_number_removed(self):
+        from ed.ingest.base import _pdf_pages_to_text, _strip_page_margins
+        pages = []
+        for i in range(3):
+            pages.append(self._page([
+                {"lines": [self._line("IEEE TRANSACTIONS ON SOMETHING",
+                                      50, 20, 550, 35)],
+                 "bbox": [50, 20, 550, 35]},
+                {"lines": [self._line(f"Body paragraph {i}", 50, 300, 550, 320)],
+                 "bbox": [50, 300, 550, 320]},
+                {"lines": [self._line(str(i + 1), 300, 780, 310, 795)],
+                 "bbox": [300, 780, 310, 795]},
+            ]))
+        pages = _strip_page_margins(pages)
+        text = _pdf_pages_to_text(pages)
+        self.assertNotIn("IEEE TRANSACTIONS", text)
+        self.assertIn("Body paragraph 0", text)
+
+    def test_hyphenated_line_break_is_joined(self):
+        from ed.ingest.base import _pdf_pages_to_text
+        page = self._page([
+            {"lines": [self._line("the trans-", 50, 100, 280, 120),
+                       self._line("former architecture", 50, 120, 280, 140)],
+             "bbox": [50, 100, 280, 140]},
+        ])
+        self.assertIn("transformer architecture", _pdf_pages_to_text([page]))
+
+
+class TestRomanHeadings(unittest.TestCase):
+    def test_ieee_roman_sections(self):
+        from ed.ingest.base import promote_pdf_headings
+        text = ("I. INTRODUCTION\n\nSome text.\n\n"
+                "II. RELATED WORK\n\nMore text.\n\n"
+                "III. METHOD\n\nMethod text.\n\n"
+                "A. Encoder Layer\n\nEncoder text.")
+        out, is_paper = promote_pdf_headings(text)
+        self.assertTrue(is_paper)
+        self.assertIn("# I. INTRODUCTION", out)
+        self.assertIn("# III. METHOD", out)
+        self.assertIn("## A. Encoder Layer", out)
+
+    def test_table_cell_word_not_promoted(self):
+        """表格里的「Model」表头不能被当成章节标题。"""
+        from ed.ingest.base import promote_pdf_headings
+        body = "正文内容在这里，足够长才能被当成段落。" * 4
+        text = (f"Introduction\n\n{body}\n\n"
+                f"Model\n\nEN-DE EN-FR 23.75 39.2 2.3 1.4\n\n"
+                f"Method\n\n{body}\n\n"
+                f"Conclusion\n\n{body}")
+        out, is_paper = promote_pdf_headings(text)
+        self.assertTrue(is_paper)
+        self.assertNotIn("# Model", out)
+        self.assertIn("# Method", out)
+
+    def test_author_line_not_promoted(self):
+        from ed.ingest.base import promote_pdf_headings
+        text = ("I. INTRODUCTION\n\ntext\n\nII. METHOD\n\ntext\n\n"
+                "III. RESULTS\n\ntext\n\nA. Smith, B. Jones")
+        out, _ = promote_pdf_headings(text)
+        self.assertNotIn("# A. Smith", out)
+
+
 class TestArxivTables(unittest.TestCase):
     def test_th_and_td_become_markdown(self):
         from ed.ingest.arxiv import latexml_to_text

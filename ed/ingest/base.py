@@ -443,31 +443,209 @@ def read_docx(path: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n\n".join(out)).strip()
 
 
+# ---------------------------------------------------------------- PDF 版面
+
+
+def _pdf_pages_from_stext(xml_path: str) -> List[Dict[str, Any]]:
+    """解析 mutool -F stext 的 XML：每页的块与行，带 bbox。"""
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(xml_path).getroot()
+    pages: List[Dict[str, Any]] = []
+    for page in root.findall("page"):
+        width = float(page.get("width") or 0) or 1.0
+        height = float(page.get("height") or 0) or 1.0
+        blocks = []
+        for block in page.findall("block"):
+            lines = []
+            for line in block.findall("line"):
+                text = (line.get("text") or "").strip()
+                if not text:
+                    continue
+                try:
+                    bbox = [float(x) for x in (line.get("bbox") or "").split()]
+                except ValueError:
+                    continue
+                if len(bbox) != 4:
+                    continue
+                lines.append({"text": text, "bbox": bbox})
+            if lines:
+                x0 = min(l["bbox"][0] for l in lines)
+                y0 = min(l["bbox"][1] for l in lines)
+                x1 = max(l["bbox"][2] for l in lines)
+                y1 = max(l["bbox"][3] for l in lines)
+                blocks.append({"lines": lines, "bbox": [x0, y0, x1, y1]})
+        if blocks:
+            pages.append({"width": width, "height": height, "blocks": blocks})
+    return pages
+
+
+def _norm_margin(text: str) -> str:
+    s = re.sub(r"\s+", " ", text).strip().lower()
+    return re.sub(r"\d+", "#", s)
+
+
+def _strip_page_margins(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """去掉重复出现的页眉、页脚和纯页码。
+
+    顶会论文每页都有「会议名 + 论文标题」和页码；它们夹在正文中间，
+    会让跨页的句子被截断，也会污染摘录。
+    """
+    if len(pages) < 3:
+        return pages
+
+    counts: Dict[str, int] = {}
+    for page in pages:
+        h = page["height"]
+        seen = set()
+        for block in page["blocks"]:
+            for line in block["lines"]:
+                y0, y1 = line["bbox"][1], line["bbox"][3]
+                if y0 < h * 0.08 or y1 > h * 0.92:
+                    k = _norm_margin(line["text"])
+                    if k and k not in seen:
+                        seen.add(k)
+                        counts[k] = counts.get(k, 0) + 1
+
+    threshold = max(3, int(len(pages) * 0.5))
+    noise = {k for k, n in counts.items() if n >= threshold}
+
+    for page in pages:
+        h = page["height"]
+        for block in page["blocks"]:
+            kept = []
+            for line in block["lines"]:
+                y0, y1 = line["bbox"][1], line["bbox"][3]
+                margin = y0 < h * 0.08 or y1 > h * 0.92
+                if margin:
+                    k = _norm_margin(line["text"])
+                    if k in noise:
+                        continue
+                    if re.fullmatch(r"[\divxlcIVXLC\-–—\s]+", line["text"].strip()):
+                        continue
+                kept.append(line)
+            block["lines"] = kept
+        page["blocks"] = [b for b in page["blocks"] if b["lines"]]
+    return pages
+
+
+def _order_page_blocks(page: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """按阅读顺序排块：双栏页先左栏后右栏，跨栏标题/图作为分隔。"""
+    blocks = page["blocks"]
+    if len(blocks) < 4:
+        return sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+
+    w = page["width"]
+    left = [b for b in blocks if b["bbox"][2] <= w * 0.55]
+    right = [b for b in blocks if b["bbox"][0] >= w * 0.45]
+    two_col = (len(left) >= max(2, len(blocks) * 0.25)
+               and len(right) >= max(2, len(blocks) * 0.25))
+    if not two_col:
+        return sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+
+    gutter = (max(b["bbox"][2] for b in left)
+              + min(b["bbox"][0] for b in right)) / 2
+    ordered = sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+    out: List[Dict[str, Any]] = []
+    band: List[Dict[str, Any]] = []
+
+    def flush() -> None:
+        if not band:
+            return
+        out.extend(sorted(
+            [b for b in band if (b["bbox"][0] + b["bbox"][2]) / 2 < gutter],
+            key=lambda b: (b["bbox"][1], b["bbox"][0])))
+        out.extend(sorted(
+            [b for b in band if (b["bbox"][0] + b["bbox"][2]) / 2 >= gutter],
+            key=lambda b: (b["bbox"][1], b["bbox"][0])))
+        band.clear()
+
+    for b in ordered:
+        crosses = b["bbox"][0] < gutter - 5 and b["bbox"][2] > gutter + 5
+        if crosses:
+            flush()
+            out.append(b)
+        else:
+            band.append(b)
+    flush()
+    return out
+
+
+def _join_lines(lines: List[Dict[str, Any]]) -> str:
+    """块内行拼成段落；行尾连字符接回单词。"""
+    buf: List[str] = []
+    for line in lines:
+        t = line["text"].strip()
+        if not t:
+            continue
+        if buf and buf[-1].endswith("-") and t[:1].islower():
+            buf[-1] = buf[-1][:-1] + t
+        else:
+            buf.append(t)
+    return re.sub(r"\s+", " ", " ".join(buf)).strip()
+
+
+def _pdf_pages_to_text(pages: List[Dict[str, Any]]) -> str:
+    chunks: List[str] = []
+    for page in pages:
+        for block in _order_page_blocks(page):
+            para = _join_lines(block["lines"])
+            if para:
+                chunks.append(para)
+    return "\n\n".join(chunks)
+
+
 def read_pdf(path: str) -> Tuple[str, bool]:
-    """返回 (文本, 是否疑似扫描件)。用 mutool 抽。"""
+    """返回 (文本, 是否疑似扫描件)。
+
+    优先用 mutool 的结构化输出（stext）：拿到每行坐标后才能分栏、
+    去页眉页脚、把行尾断词接回去。失败再退回纯文本模式。
+    """
     import shutil
     import subprocess
+    import tempfile
+
     mutool = shutil.which("mutool")
     if not mutool:
         raise RuntimeError("需要 mutool：brew install mupdf-tools")
-    out = subprocess.run(
-        [mutool, "draw", "-F", "txt", "-o", "-", path],
-        capture_output=True, text=True, timeout=900,
-    )
-    txt = out.stdout or ""
-    pages = 0
-    try:
-        info = subprocess.run(
-            [mutool, "info", path], capture_output=True, text=True, timeout=120
-        ).stdout
-        m = re.search(r"Pages:\s*(\d+)", info)
-        if m:
-            pages = int(m.group(1))
-    except Exception:
-        pass
+
+    txt = ""
+    page_count = 0
+    with tempfile.TemporaryDirectory() as td:
+        xml_path = os.path.join(td, "stext.xml")
+        try:
+            subprocess.run(
+                [mutool, "draw", "-F", "stext", "-o", xml_path, path],
+                capture_output=True, text=True, timeout=900, check=True,
+            )
+            pages = _pdf_pages_from_stext(xml_path)
+            pages = _strip_page_margins(pages)
+            txt = _pdf_pages_to_text(pages)
+            page_count = len(pages)
+        except Exception:
+            txt = ""
+
+    if not txt.strip():
+        out = subprocess.run(
+            [mutool, "draw", "-F", "txt", "-o", "-", path],
+            capture_output=True, text=True, timeout=900,
+        )
+        txt = out.stdout or ""
+
+    if not page_count:
+        try:
+            info = subprocess.run(
+                [mutool, "info", path], capture_output=True, text=True, timeout=120
+            ).stdout
+            m = re.search(r"Pages:\s*(\d+)", info)
+            if m:
+                page_count = int(m.group(1))
+        except Exception:
+            pass
+
     scrubbed = re.sub(r"\s", "", txt)
-    if pages >= 5:
-        scanned = (len(scrubbed) / pages) < 50
+    if page_count >= 5:
+        scanned = (len(scrubbed) / page_count) < 50
     else:
         scanned = len(scrubbed) < 20
     txt = "\n".join(ln.rstrip() for ln in txt.split("\n"))
@@ -485,6 +663,42 @@ _PAPER_SECTIONS = {
     "references", "appendix", "acknowledgments", "acknowledgements",
 }
 _PAPER_NUMBERED = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){0,2})\s+([A-Z][^\n]{1,60})$")
+# IEEE 常见写法：I. INTRODUCTION / IV. EXPERIMENTS；二级是 A. Setup
+_PAPER_ROMAN = re.compile(r"^([IVXLC]{1,7})\.\s+([A-Z][^\n]{1,60})$")
+_PAPER_LETTER = re.compile(r"^([A-Z])\.\s+([A-Z][^\n]{1,60})$")
+# 允许「B. Results」这种单标题词，但不允许「A. Smith」这种作者行
+_LETTER_SECTION_WORDS = {
+    "results", "result", "method", "methods", "experiments", "evaluation",
+    "analysis", "discussion", "conclusion", "conclusions", "background",
+    "approach", "setup", "implementation", "limitations", "related work",
+    "future work", "introduction", "motivation", "overview",
+}
+
+
+def _looks_like_section_title(title: str) -> bool:
+    """罗马/字母编号的标题判断：挡掉作者行和正文行。"""
+    if "," in title or ";" in title:
+        return False
+    if title.endswith((".", ",", ";", ":")):
+        return False
+    words = title.split()
+    return (len(words) >= 2 or title.isupper()
+            or title.lower() in _LETTER_SECTION_WORDS)
+
+
+def _next_nonempty(lines: List[str], i: int, lookahead: int = 4) -> str:
+    """看标题后面是什么：表格单元格后面通常紧跟数字行。"""
+    for j in range(i + 1, min(i + 1 + lookahead, len(lines))):
+        s = lines[j].strip()
+        if s:
+            return s
+    return ""
+
+
+def _digit_ratio(s: str) -> float:
+    if not s:
+        return 0.0
+    return sum(ch.isdigit() for ch in s) / len(s)
 
 
 def promote_pdf_headings(text: str) -> Tuple[str, bool]:
@@ -501,11 +715,26 @@ def promote_pdf_headings(text: str) -> Tuple[str, bool]:
             continue
         level = None
         if s.lower().rstrip(":") in _PAPER_SECTIONS:
-            level = 1
+            # 白名单里有 model / results 这类短词，表格表头也会长成一行。
+            # 长词直接认；短词要求后面是正文（够长、数字不密）。
+            if len(s) >= 8 or s.isupper():
+                level = 1
+            else:
+                nxt = _next_nonempty(lines, i)
+                if len(nxt) >= 60 and _digit_ratio(nxt) <= 0.15:
+                    level = 1
         else:
             m = _PAPER_NUMBERED.match(s)
             if m and not s.endswith((".", ",", ";", ":")):
                 level = m.group(1).count(".") + 1
+            else:
+                rm = _PAPER_ROMAN.match(s)
+                if rm and _looks_like_section_title(rm.group(2)):
+                    level = 1
+                else:
+                    lm = _PAPER_LETTER.match(s)
+                    if lm and _looks_like_section_title(lm.group(2)):
+                        level = 2
         if level:
             cand[i] = level
     if len(cand) < 3:

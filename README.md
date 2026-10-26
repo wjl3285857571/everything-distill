@@ -203,7 +203,7 @@ ed/
   verify/
     skill_meta.py      产物元信息校验
 templates/             第一段/第二段的 prompt 模板
-tests/                 98 项回归测试
+tests/                 104 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -262,8 +262,14 @@ arXiv 官方会给论文生成 HTML 版（`arxiv.org/html/<id>`），带章节�
 python3 -m ed ingest ~/Downloads/paper.pdf --workdir runs/some-paper
 ```
 
-PDF 抽出的文本没有标题标记，所以会先认章节行（`Introduction`、`3 Model Architecture`、`3.1 Encoder` 这类独立短行），
+PDF 抽出的文本没有标题标记，所以会先认章节行（`Introduction`、`3 Model Architecture`、`3.1 Encoder`，以及 IEEE 常见的 `I. INTRODUCTION` / `A. Setup`），
 认出来就提升成标题、按章切块；认不出就原样处理，不乱动正文。
+
+读取用 `mutool -F stext` 拿每行坐标，所以还能做三件纯文本模式做不到的事：
+
+- **双栏排序**：先左栏后右栏，跨栏标题/图作为分隔，不会把两栏句子交错在一起
+- **页眉页脚清理**：在多页重复出现的会议名、论文标题和页码会被剔掉
+- **断词接回**：行尾 `trans-` + 下一行 `former` 会拼回 `transformer`，不破坏摘录匹配
 
 **代价要说清**：公式在 PDF 文本层里是符号碎片，表格会散成数字流——这部分质量不如 arXiv HTML 版。能用 HTML 版就用 HTML 版。
 
@@ -298,6 +304,7 @@ PDF 抽出的文本没有标题标记，所以会先认章节行（`Introduction
 ## 已知限制
 
 - 论文表格压成 Markdown 时会保留数字，但 `rowspan` 的跨行表头不会合并，复杂表格可能列错位
+- PDF 里的图内标签（如模型结构图上的 `NSP` / `BERT`）可能作为短行混进正文，不影响章节结构
 - 抖音/小红书解析依赖页面结构，平台改版需跟进（历史上都跟上了）
 - 微博批量抓取会触发风控，单条链接使用稳定
 - 喜马拉雅付费内容不提供音频（版权墙，诚实报错而非假装失败）
@@ -474,7 +481,13 @@ A PDF from a journal or a colleague goes straight in:
 python3 -m ed ingest ~/Downloads/paper.pdf --workdir runs/some-paper
 ```
 
-PDF text has no heading markup, so section lines are recognised first (`Introduction`, `3 Model Architecture`, `3.1 Encoder` — standalone short lines). When found they become headings and chunking breaks per chapter; when not, the text is left untouched.
+PDF text has no heading markup, so section lines are recognised first (`Introduction`, `3 Model Architecture`, `3.1 Encoder`, plus IEEE-style `I. INTRODUCTION` / `A. Setup`). When found they become headings and chunking breaks per chapter; when not, the text is left untouched.
+
+Reading uses `mutool -F stext` so line coordinates are available, which enables three things plain text mode cannot do:
+
+- **Two-column ordering** — left column then right column, with full-width headings/figures as separators
+- **Header/footer removal** — conference names, running titles, and page numbers repeated across pages are dropped
+- **De-hyphenation** — a line ending in `trans-` followed by `former` is joined back into `transformer`, so excerpt matching still works
 
 **The honest trade-off**: formulas in a PDF text layer come out as symbol fragments and tables dissolve into number streams — that part is worse than the arXiv HTML edition. Prefer HTML when it exists.
 
