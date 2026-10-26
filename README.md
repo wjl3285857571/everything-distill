@@ -203,7 +203,7 @@ ed/
   verify/
     skill_meta.py      产物元信息校验
 templates/             第一段/第二段的 prompt 模板
-tests/                 104 项回归测试
+tests/                 106 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -286,6 +286,9 @@ PDF 抽出的文本没有标题标记，所以会先认章节行（`Introduction
 | 局限 | 作者承认的边界；作者没承认但明显没验证的，标注成推断 |
 
 `type` 字段在论文里换成论文语义：`claim` / `method` / `result` / `ablation` / `limitation` / `term` / `question`。
+
+筛选器也跟着换权重：`method` / `result` 在第一档，`ablation` / `claim` 第二档，`term` 降到第三档。
+长论文超过 200 条上限时，先保住方法和结果，而不是被术语挤掉。
 
 ### 边界必须分三态
 
@@ -504,6 +507,8 @@ A paper has its own skeleton, and the generic checklist is not enough. Papers ge
 | Limitations | Boundaries the authors admit; unverified ones get marked as inference |
 
 `type` switches to paper semantics: `claim` / `method` / `result` / `ablation` / `limitation` / `term` / `question`.
+
+The selector switches with it: `method` / `result` rank first, `ablation` / `claim` second, and `term` drops to the third tier — so a long paper over the 200-item cap keeps its methods and results instead of losing them to glossary entries.
 
 ### Boundaries must be three-state
 

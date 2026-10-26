@@ -31,25 +31,43 @@ TYPE_HINT = {
     "other": 3,
 }
 
+# 论文模式换了一套 type 语义；不单独映射的话，method/result/ablation
+# 会全部落到默认档，长论文超过上限时先被裁掉的反而是核心方法和结果。
+PAPER_TYPE_HINT = {
+    "method": 0,
+    "result": 0,
+    "ablation": 1,
+    "claim": 1,
+    "counter": 1,
+    "limitation": 2,
+    "term": 2,
+    "question": 2,
+    "framework": 1,
+    "principle": 1,
+    "case": 2,
+    "other": 3,
+}
 
-def _rank(ins: Insight) -> tuple:
+
+def _rank(ins: Insight, hints: Dict[str, int] = TYPE_HINT) -> tuple:
     """块内排序：越小越优先。"""
     has_boundary = 0 if (ins.boundary and ins.boundary != "作者未说明") else 1
     has_detail = 0 if ins.detail else 1
-    t = TYPE_HINT.get(ins.type, 3)
+    t = hints.get(ins.type, 3)
     # 摘录太短的信息量低
     short = 1 if len(ins.support or "") < 12 else 0
     return (has_boundary, has_detail, t, short)
 
 
 def _round_robin(groups: Dict[int, List[Insight]], budget: int,
-                 start_per_block: int = 1) -> List[Insight]:
+                 start_per_block: int = 1,
+                 hints: Dict[str, int] = TYPE_HINT) -> List[Insight]:
     """按块轮转取，直到用完预算。
 
     这样每块被抽中的概率相等，不受某块条目多的影响。
     """
     for b in groups:
-        groups[b].sort(key=_rank)
+        groups[b].sort(key=lambda i: _rank(i, hints))
 
     picked: List[Insight] = []
     blocks = sorted(groups)
@@ -120,11 +138,13 @@ def select(stage1: Stage1, max_total: int = 200,
         else:
             no_block.append(ins)
 
-    picked = _round_robin(groups, max_total, min_per_block)
+    paper = stage1.source.kind in ("arxiv", "paper")
+    hints = PAPER_TYPE_HINT if paper else TYPE_HINT
+    picked = _round_robin(groups, max_total, min_per_block, hints)
 
     # 还有预算就补上没块号的
     if len(picked) < max_total and no_block:
-        no_block.sort(key=_rank)
+        no_block.sort(key=lambda i: _rank(i, hints))
         picked.extend(no_block[:max_total - len(picked)])
 
     picked.sort(key=lambda i: (i.locator.block or 10**6))

@@ -470,6 +470,30 @@ class TestArxivTables(unittest.TestCase):
         self.assertIn("只保留前 30 行", t)
 
 
+class TestSelectPaperTypes(unittest.TestCase):
+    @staticmethod
+    def _mk(type_, id_):
+        return Insight(id=id_, claim=id_, support="s" * 20,
+                       locator=Locator(block=1), type=type_)
+
+    def test_paper_prefers_result_over_term(self):
+        """论文超过上限时，不能先裁掉方法/结果，留下术语。"""
+        from ed.distill.select import select
+        s1 = Stage1(source=Source(kind="paper", origin="p", title="p"),
+                    insights=[self._mk("term", "T"),
+                              self._mk("result", "R")])
+        r = select(s1, max_total=1)
+        self.assertEqual(r["insights"][0].id, "R")
+
+    def test_book_still_prefers_principle(self):
+        from ed.distill.select import select
+        s1 = Stage1(source=Source(kind="text", origin="b", title="b"),
+                    insights=[self._mk("case", "C"),
+                              self._mk("principle", "P")])
+        r = select(s1, max_total=1)
+        self.assertEqual(r["insights"][0].id, "P")
+
+
 class TestRelevanceCap(unittest.TestCase):
     def test_today_respects_total_cap(self):
         from ed.render.document import _pick_relevant
