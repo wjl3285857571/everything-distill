@@ -173,6 +173,7 @@ def render(
     title: str = "",
     source_note: str = "",
     depth_note: str = "",
+    narration: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """生成最终 Markdown 文档。"""
     L: List[str] = []
@@ -240,18 +241,31 @@ def render(
     if stage2 and getattr(stage2, "overview", ""):
         overview = stage2.overview
     if not overview:
-        overview = stage1.overview or _synth_overview(stage1)
+        if narration:
+            parts = [f"- **{c.get('title', '')}**：{c.get('summary', '')}"
+                     for c in narration if c.get("summary")]
+            overview = ("全书大致分这几块：\n\n" + "\n".join(parts)
+                        if parts else "（未能生成概览）")
+        else:
+            overview = stage1.overview or _synth_overview(stage1)
     L.append(overview)
     L.append("")
     if stage1.stats:
         bits = []
-        if stage1.stats.get("有效字数"):
-            bits.append(f"{stage1.stats['有效字数']:,} 字")
-        # 正文渲染的是第一段的全部洞察，所以条数按第一段算；
-        # 第二段的条数只代表「它挑了几条讲」，不是正文有多少条
-        total_ins = len(insights)
-        if total_ins:
-            bits.append(f"{total_ins} 条洞察" + (f"（★ 重点 {_hi} 条）" if _hi else ""))
+        if narration:
+            bits.append(f"{len(narration)} 个部分")
+            words = sum(len(c.get("prose") or "") for c in narration)
+            if words:
+                bits.append(f"讲述 {words:,} 字")
+        else:
+            if stage1.stats.get("有效字数"):
+                bits.append(f"{stage1.stats['有效字数']:,} 字")
+            # 正文渲染的是第一段的全部洞察，所以条数按第一段算；
+            # 第二段的条数只代表「它挑了几条讲」，不是正文有多少条
+            total_ins = len(insights)
+            if total_ins:
+                bits.append(f"{total_ins} 条洞察"
+                            + (f"（★ 重点 {_hi} 条）" if _hi else ""))
         if bits:
             L.append(f"*{' ｜ '.join(bits)}*")
             L.append("")
@@ -274,7 +288,37 @@ def render(
     L.append(f"## {CN[num['content']-1]}、内容本身")
     L.append("")
 
-    if (stage2 and getattr(stage2, "structure", None)) or stage1.structure:
+    if narration:
+        # 讲述模式：先给一张全书地图，再一段一段讲透。
+        # 不再渲染「200 条洞察卡片」——那是知识库形态，不适合人读。
+        L.append("### 全书脉络")
+        L.append("")
+        for ch in narration:
+            summary = (ch.get("summary") or "").strip()
+            if summary:
+                L.append(f"- **{ch.get('title', '')}**：{summary}")
+        L.append("")
+        for ch in narration:
+            L.append(f"### {ch.get('title', '')}")
+            L.append("")
+            for para in (ch.get("prose") or "").split("\n\n"):
+                para = para.strip()
+                if para:
+                    L.append(para)
+                    L.append("")
+            for q in ch.get("quotes") or []:
+                text = (q.get("text") or "").strip()
+                if not text:
+                    continue
+                L.append(f"> 原文：{text}")
+                why = (q.get("why") or "").strip()
+                if why:
+                    L.append(">")
+                    L.append(f"> — {why}")
+                L.append("")
+
+    if not narration and ((stage2 and getattr(stage2, "structure", None))
+                          or stage1.structure):
         L.append("### 结构")
         L.append("")
         L.append("| 部分 | 讲什么 | 与前一部分的关系 |")
@@ -290,7 +334,7 @@ def render(
         L.append("")
 
     # 相关度注入已在函数开头做完，这里只负责排序
-    if any(ins.relevance for ins in insights):
+    if not narration and any(ins.relevance for ins in insights):
         rank = {"high": 0, "medium": 1, "low": 2}
 
         def _rank(ins):
@@ -299,7 +343,7 @@ def render(
             return rank.get(str(level or ""), 3)
 
         insights.sort(key=_rank)
-    if insights:
+    if not narration and insights:
         L.append("### 关键洞察")
         L.append("")
         # 条数多时给一行导航：读者得知道重点在哪、要不要全读
@@ -331,7 +375,7 @@ def render(
                 L.append(f"> 原文：{ins.support}")
                 L.append("")
 
-    if stage1.counter_examples:
+    if not narration and stage1.counter_examples:
         L.append("### 失效场景与反例")
         L.append("")
         for c in stage1.counter_examples:
@@ -342,7 +386,7 @@ def render(
                 L.append(f"  - 原文：{c.support}")
         L.append("")
 
-    if stage1.glossary:
+    if not narration and stage1.glossary:
         L.append("### 专有名词")
         L.append("")
         L.append("| 词 | 作者的定义 |")
@@ -351,7 +395,7 @@ def render(
             L.append(f"| **{_md_escape(g.get('term',''))}** | {_md_escape(g.get('definition',''))} |")
         L.append("")
 
-    if stage1.open_questions:
+    if not narration and stage1.open_questions:
         L.append("### 这内容引出的问题")
         L.append("")
         for q in stage1.open_questions:

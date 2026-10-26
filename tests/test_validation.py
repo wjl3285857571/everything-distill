@@ -609,6 +609,52 @@ class TestRelevanceCap(unittest.TestCase):
         self.assertEqual(len(_pick_relevant(items, cap=30)), 30)
 
 
+class TestNarrate(unittest.TestCase):
+    def _doc(self):
+        return Document(
+            text="",
+            blocks=[Block(index=1, text="甲" * 4000, heading="第一章", words=4000),
+                    Block(index=2, text="乙" * 4000, heading="第二章", words=4000)],
+            source=Source(kind="text", origin="x", title="x"),
+        )
+
+    def test_group_blocks_splits_on_heading(self):
+        from ed.distill.narrate import group_blocks
+        groups = group_blocks(self._doc(), min_chars=3000, max_chars=100000)
+        self.assertEqual([[b.index for b in g] for g in groups], [[1], [2]])
+
+    def test_run_narrate_checks_quotes(self):
+        from ed.distill.narrate import run_narrate
+        payload = {"title": "第一章", "summary": "讲了甲",
+                   "prose": "第一段。\n\n第二段。",
+                   "quotes": [{"text": "甲" * 20, "block": 1, "why": "因为"}]}
+
+        class FakeRunner(Runner):
+            def run(self, system, user):
+                return json.dumps(payload, ensure_ascii=False)
+
+        notes, report = run_narrate(self._doc(), FakeRunner(), workers=1)
+        self.assertTrue(report["通过"])
+        self.assertEqual(len(notes[0].quotes), 1)
+        self.assertIn("第一段", notes[0].prose)
+
+    def test_render_narration_hides_insight_cards(self):
+        from ed.render.document import render
+        s1 = Stage1(source=Source(kind="text", origin="x", title="x"),
+                    insights=[Insight(id="I1", claim="卡片式洞察",
+                                      support="x", locator=Locator(block=1))])
+        md = render(s1, None, narration=[{
+            "title": "第一章", "summary": "讲了甲",
+            "prose": "这是连贯正文。\n\n第二段。",
+            "quotes": [{"text": "原文一句", "why": "因为重要"}],
+        }])
+        self.assertIn("这是连贯正文", md)
+        self.assertIn("全书脉络", md)
+        self.assertIn("> 原文：原文一句", md)
+        self.assertNotIn("关键洞察", md)
+        self.assertNotIn("卡片式洞察", md)
+
+
 class TestRunnerFactory(unittest.TestCase):
     def test_file_runner_takes_path_kwarg(self):
         from ed.runner import FileRunner, default_runner

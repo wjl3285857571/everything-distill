@@ -186,6 +186,12 @@ def _workdir_failures(workdir: str, mem_dir: str) -> List[str]:
                     f"{len(v2['引文无法核对'])} 条引文对不上来源")
         except Exception as e:  # 读不出来也算没通过，不假装正常
             out.append(f"第二段：校验失败（{type(e).__name__}）")
+
+    nar = workspace.load_narration(workdir)
+    if nar:
+        bad = [c for c in nar if c.get("error")]
+        if bad:
+            out.append(f"讲述：{len(bad)} 部分失败")
     return out
 
 
@@ -206,8 +212,9 @@ def cmd_render(args) -> int:
         return 2
 
     depth_note = DEPTH_HINT.get(args.depth, "")
+    narration = workspace.load_narration(args.workdir)
     md = render(stage1, stage2, title=args.title, source_note=args.source_note,
-                depth_note=depth_note)
+                depth_note=depth_note, narration=narration)
     if failures:
         md = ("> ⚠ **校验未通过**：" + "；".join(failures)
               + "\n>\n> 下面的内容可能不完整或缺少依据，别当成可信成品。\n\n" + md)
@@ -431,6 +438,24 @@ def cmd_check_skill(args) -> int:
     return 0 if r["通过"] else 2
 
 
+def cmd_narrate(args) -> int:
+    from .distill.narrate import run_narrate
+    doc = workspace.load_document(args.workdir)
+    runner = make_runner(args)
+    print(f"讲述：{len(doc.blocks)} 块，按章节分组")
+    notes, report = run_narrate(
+        doc, runner, workers=args.workers,
+        progress=lambda m: print("  " + m, flush=True))
+    workspace.save_narration(args.workdir, notes, report)
+    print(f"\n部分 {report['部分数']} ｜ 成功 {report['成功']} ｜ "
+          f"失败 {report['失败']} ｜ 作废引用 {report['作废引用']} ｜ "
+          f"{report['总字数']:,} 字")
+    for f in report["失败明细"][:5]:
+        print(f"  ✘ {f['title']}：{f['error']}")
+    print(f"→ narrate.json 已写入 {args.workdir}")
+    return 0 if report["通过"] else 2
+
+
 def cmd_run(args) -> int:
     rc = cmd_ingest(args)
     if rc:
@@ -473,6 +498,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="保留多少条洞察（超出按块轮转裁剪，默认 200）")
     common(p)
     p.set_defaults(func=cmd_stage1)
+
+    p = sub.add_parser("narrate", help="逐章讲述：把内容讲成连贯长文")
+    p.add_argument("--workdir", required=True)
+    common(p)
+    p.set_defaults(func=cmd_narrate)
 
     p = sub.add_parser("stage2", help="第二段：结合处境")
     p.add_argument("--workdir", required=True)

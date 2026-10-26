@@ -131,8 +131,16 @@ python3 -m ed render --workdir runs/my-video --out 蒸馏理解.md
 ```bash
 python3 -m ed ingest 书.epub --workdir runs/书名
 python3 -m ed plan --workdir runs/书名
-# ... 同上
+
+# 逐章讲述：把书讲成连贯长文（书 / 长文推荐走这条）
+python3 -m ed narrate --workdir runs/书名
+
+# ... 第一段、第二段同上
+python3 -m ed render --workdir runs/书名 --out 书名-讲述版.md
 ```
+
+`narrate` 按章节分组，每部分让模型写 1200–2500 字连贯正文。产物里**不会**再出现
+「200 条洞察卡片」——那种形态适合做知识库，不适合人读。
 
 ### 只拿视频元数据 / 按时间点抽帧
 
@@ -140,6 +148,17 @@ python3 -m ed plan --workdir runs/书名
 python3 -m ed metadata "https://youtu.be/xxxx"        # 标题/作者/章节
 python3 -m ed frames "https://youtu.be/xxxx" --at 00:12:30 --scene   # 局部抽帧
 ```
+
+### 两种产物形态
+
+同一份内容可以出两种文档，取决于有没有跑 `narrate`：
+
+| 形态 | 触发 | 正文长什么样 | 适合 |
+|---|---|---|---|
+| **讲述版** | 有 `narrate.json` | 按章分节，每节 1200–2500 字连贯正文，关键处引原文 | 读书、看长文，想被讲透 |
+| **卡片版** | 没跑 narrate | 结构表 + 关键洞察列表（每条一句 + 原文） | 快速检索、当知识库 |
+
+小说和名著请用讲述版。卡片版会把人物和情节压成「原则/案例」，那是把小说讲坏。
 
 ### 校验没过时会怎样
 
@@ -195,6 +214,7 @@ ed/
     frames.py          Level 3 按需抽帧（场景检测）
   distill/
     stage1.py          第一段：内容蒸馏（批处理 / 回执 / 校验）
+    narrate.py         逐章讲述：按章写连贯长文，不是卡片
     stage2.py          第二段：结合读者处境
     horizon.py         「时间距离」分档（增量补标）
     select.py          机械筛选（轮转采样）
@@ -202,8 +222,8 @@ ed/
     document.py        最终文档渲染（分档 / 依据 / 去重）
   verify/
     skill_meta.py      产物元信息校验
-templates/             第一段/第二段的 prompt 模板
-tests/                 116 项回归测试
+templates/             第一段/第二段的 prompt 模板 + narrate_system.md
+tests/                 119 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -425,8 +445,27 @@ python3 -m ed render --workdir runs/my-video --out distilled.md
 ```bash
 python3 -m ed ingest book.epub --workdir runs/book
 python3 -m ed plan --workdir runs/book
-# ... same as above
+
+# chapter-by-chapter narration: a continuous long-form explanation
+python3 -m ed narrate --workdir runs/book
+
+# ... stage 1 / stage 2 as above
+python3 -m ed render --workdir runs/book --out book-narrative.md
 ```
+
+`narrate` groups blocks by chapter and asks for 1200–2500 characters of connected prose per
+part. The output **no longer** contains a 200-item insight-card list — that shape suits a
+knowledge base, not a person reading.
+
+### Two output shapes
+
+| Shape | Trigger | Body | Best for |
+|---|---|---|---|
+| **Narrative** | `narrate.json` exists | Chapter sections, 1200–2500 characters of prose each, key quotes inline | Books and long reads you want explained |
+| **Cards** | no narrate run | Structure table + insight list (one line + source quote each) | Fast lookup, knowledge base |
+
+Use narrative for fiction and classics. The card shape compresses characters and plot into
+"principles/cases", which ruins a novel.
 
 ### When validation fails
 

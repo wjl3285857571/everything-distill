@@ -111,6 +111,22 @@ def save_stage2(workdir: str, stage2: Stage2) -> None:
     _dump(os.path.join(workdir, "stage2.json"), stage2.to_dict())
 
 
+def save_narration(workdir: str, notes, report: Dict[str, Any]) -> None:
+    ensure(workdir)
+    _dump(os.path.join(workdir, "narrate.json"),
+          {"chapters": [n.to_dict() for n in notes], "report": report})
+
+
+def load_narration(workdir: str) -> Optional[List[Dict[str, Any]]]:
+    p = os.path.join(workdir, "narrate.json")
+    if not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        d = json.load(f)
+    chapters = d.get("chapters") or []
+    return chapters or None
+
+
 def load_stage2(workdir: str) -> Stage2:
     with open(os.path.join(workdir, "stage2.json"), encoding="utf-8") as f:
         d = json.load(f)
