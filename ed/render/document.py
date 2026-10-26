@@ -495,8 +495,12 @@ def render(
 
     L.append("---")
     L.append("")
-    L.append("*本文由 everything-distill 生成。内容摘录均经程序回原文逐字核对；"
-             "个人化结论均挂依据。蒸馏结果会因所用模型而异。*")
+    has_personal = bool(stage2 and (stage2.relevant or stage2.basis))
+    tail = "内容摘录均经程序回原文逐字核对"
+    if has_personal:
+        tail += "；个人化结论均挂依据"
+    L.append(f"*本文由 everything-distill 生成。{tail}。"
+             "蒸馏结果会因所用模型而异。*")
     L.append("")
     return "\n".join(L)
 

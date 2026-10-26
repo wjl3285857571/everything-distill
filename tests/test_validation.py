@@ -676,6 +676,23 @@ class TestNarrate(unittest.TestCase):
         self.assertNotIn("卡片式洞察", md)
 
 
+class TestFooter(unittest.TestCase):
+    def test_no_personal_claim_without_stage2(self):
+        """没有个人化内容时，页脚不该说「个人化结论均挂依据」。"""
+        from ed.render.document import render
+        md = render(Stage1(source=Source(kind="text", origin="x", title="x")), None)
+        self.assertNotIn("个人化结论均挂依据", md)
+
+    def test_personal_claim_with_stage2(self):
+        from ed.render.document import render
+        s2 = Stage2(
+            relevant=[{"insight_id": "I1", "why": "x", "basis": [1]}],
+            basis=[Basis(id=1, kind="content", source="s", quote="q")],
+        )
+        md = render(Stage1(source=Source(kind="text", origin="x", title="x")), s2)
+        self.assertIn("个人化结论均挂依据", md)
+
+
 class TestRunnerFactory(unittest.TestCase):
     def test_file_runner_takes_path_kwarg(self):
         from ed.runner import FileRunner, default_runner
