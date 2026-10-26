@@ -277,7 +277,7 @@ ed/
     document.py        最终文档渲染（分档 / 依据 / 去重）
     brief.py           蒸馏版渲染
 templates/             第一段/第二段的 prompt + brief_*.md + narrate_system.md
-tests/                 137 项回归测试
+tests/                 143 项回归测试
 ```
 
 ## 实测性能（Apple M5）
