@@ -52,6 +52,9 @@ base URL 和模型也可用 `OPENAI_BASE_URL` / `OPENAI_MODEL` 指定。
 # 长书：--fast 按章采样，一次调用出概述（快，细节少）
 python3 -m ed run 书.epub --workdir runs/书名 --out 书名-蒸馏版.md --fast
 
+# 视频/播客：run 会自动转写，再进同一套蒸馏
+python3 -m ed run "https://www.bilibili.com/video/BVxxxx" --workdir runs/v --out 视频-蒸馏版.md --fast
+
 # 想讲透：不加 --fast，先概述，再逐章讲
 python3 -m ed run 书.epub --workdir runs/书名 --out 书名-蒸馏版.md
 ```

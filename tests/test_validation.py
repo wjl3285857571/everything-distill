@@ -841,6 +841,31 @@ class TestRunners(unittest.TestCase):
         self.assertEqual(body["messages"][1]["content"], "user")
 
 
+class TestMediaRouting(unittest.TestCase):
+    def test_youtube_is_media(self):
+        from ed.cli import _media_platform
+        self.assertEqual(_media_platform("https://youtu.be/x"), "YouTube")
+        self.assertEqual(_media_platform("https://example.com/a"), "")
+
+    def test_local_media_ext(self):
+        from ed.cli import _is_media_input
+        self.assertTrue(_is_media_input("/tmp/a.mp3"))
+        self.assertFalse(_is_media_input("/tmp/a.txt"))
+
+    def test_load_media_builds_document(self):
+        from types import SimpleNamespace
+        from ed.cli import _load_media
+        with patch("ed.ingest.video.to_transcript", return_value={
+                "ok": True, "text": "[00:00:00] 你好\n[00:00:03] 世界",
+                "platform": "YouTube", "via": "subtitle", "attempts": []}):
+            with patch("ed.ingest.metadata.metadata",
+                       return_value={"title": "视频标题"}):
+                doc = _load_media("https://youtu.be/x", SimpleNamespace())
+        self.assertEqual(doc.source.kind, "video")
+        self.assertEqual(doc.source.title, "视频标题")
+        self.assertIn("世界", doc.text)
+
+
 class TestRunnerFactory(unittest.TestCase):
     def test_file_runner_takes_path_kwarg(self):
         from ed.runner import FileRunner, default_runner

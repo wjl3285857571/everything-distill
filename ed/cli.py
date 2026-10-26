@@ -17,6 +17,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 from typing import List, Optional
 
@@ -25,7 +26,7 @@ from .config import SHORT_DOC_CHARS, get_env
 from .context.profile import Context
 from .distill.stage1 import run_stage1, verify_stage1
 from .distill.stage2 import run_stage2, snap_basis_to_sources, verify_stage2
-from .ingest.base import load
+from .ingest.base import Document, load
 from .render.document import render
 from .runner import (CommandRunner, FileRunner, HermesRunner,  # noqa: E402
                      OpenAICompatibleRunner, Runner, RunnerError)
@@ -101,12 +102,84 @@ def load_context(args) -> Context:
     return ctx
 
 
+MEDIA_PLATFORMS = {
+    "YouTube", "B站", "抖音", "TikTok", "Vimeo", "小宇宙播客", "喜马拉雅",
+}
+_MEDIA_EXT = r"\.(mp3|mp4|m4a|wav|webm|opus|flac|ogg|mov|mkv)$"
+
+
+def _media_platform(raw: str) -> str:
+    """是不是「要转写」的媒体输入；是就返回平台名。"""
+    from .ingest.video import platform_of
+    platform = platform_of(raw)
+    if platform in MEDIA_PLATFORMS:
+        return platform
+    if platform == "小红书":
+        # 小红书图文和视频混在一起：只有视频才转写，图文仍走 load_url
+        try:
+            from .ingest.cn_platforms import xhs_parse_note
+            note = xhs_parse_note(raw)
+            if note.get("ok") and note.get("is_video"):
+                return platform
+        except Exception:
+            pass
+    return ""
+
+
+def _is_media_input(raw: str) -> bool:
+    if raw.startswith(("http://", "https://")):
+        return bool(_media_platform(raw))
+    return bool(re.search(_MEDIA_EXT, raw, re.I))
+
+
+def _load_media(raw: str, args) -> Document:
+    """视频/播客/本地音视频 → Document（先转写，再进统一蒸馏）。"""
+    from .ingest.base import Document, build_blocks, effective_words
+    from .ingest.video import to_transcript
+    from .schema import Source
+
+    r = to_transcript(
+        raw,
+        prefer=getattr(args, "prefer", "auto"),
+        asr_model=getattr(args, "asr_model", "whisper-large-v3-turbo"),
+        language=getattr(args, "language", None),
+        asr_engine=getattr(args, "asr_engine", "auto"))
+    for a in r.get("attempts", []):
+        mark = "✔" if a.get("成功") else "✘"
+        print(f"  {mark} {a.get('步骤')}：{a.get('细节', '')}")
+    if not r.get("ok"):
+        raise RuntimeError(
+            f"视频转写失败：{r.get('reason_code')} — {r.get('reason')}\n"
+            f"{r.get('next_step', '')}")
+
+    text = r["text"]
+    title = str(r.get("title") or "").strip()
+    if not title and raw.startswith(("http://", "https://")):
+        try:
+            from .ingest.metadata import metadata
+            title = str((metadata(raw) or {}).get("title") or "").strip()
+        except Exception:
+            pass
+    if not title:
+        title = (os.path.basename(raw) if not raw.startswith("http")
+                 else f"{r.get('platform') or '视频'}")
+    src = Source(kind="video", origin=raw, title=title[:80],
+                 meta={"platform": r.get("platform", ""),
+                       "via": r.get("via", "")})
+    blocks = build_blocks(text)
+    stats = effective_words(text)
+    stats["块数"] = len(blocks)
+    return Document(text=text, blocks=blocks, source=src, stats=stats)
+
+
 def cmd_ingest(args) -> int:
     raw = args.input
     from .ingest.arxiv import is_arxiv
     if is_arxiv(raw):
         from .ingest.arxiv import load_arxiv
         doc = load_arxiv(raw)
+    elif _is_media_input(raw):
+        doc = _load_media(raw, args)
     elif raw.startswith(("http://", "https://")):
         from .ingest.base import load_url
         doc = load_url(raw)

@@ -115,13 +115,17 @@ cp .env.example .env
 ### 蒸馏一条视频链接
 
 ```bash
-# 一步：链接 → 带时间戳的逐字稿（自动识别平台、自动降级）
+# 一条命令：链接 → 转写 → 蒸馏版（run 会自动识别视频并转写）
+python3 -m ed run "https://www.bilibili.com/video/BVxxxx" \
+  --workdir runs/my-video --out 视频-蒸馏版.md --fast
+
+# 只想先拿逐字稿（调试或手动编排）
 python3 -m ed transcript "https://www.bilibili.com/video/BVxxxx" --out transcript.txt
 
 # 或者看这个链接能不能处理、会走哪条路（只诊断不下载）
 python3 -m ed transcript "https://youtu.be/xxxx" --diagnose-only
 
-# 二步：逐字稿 → 工作区
+# 二步：逐字稿 → 工作区（也可以直接把视频链接/Document 交给 ingest）
 python3 -m ed ingest transcript.txt --workdir runs/my-video
 
 # 三步：生成批次 prompt，交给你的 Agent / 会话模型执行
@@ -268,7 +272,7 @@ ed/
     document.py        最终文档渲染（分档 / 依据 / 去重）
     brief.py           蒸馏版渲染
 templates/             第一段/第二段的 prompt + brief_*.md + narrate_system.md
-tests/                 134 项回归测试
+tests/                 137 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -373,6 +377,9 @@ PDF 抽出的文本没有标题标记，所以会先认章节行（`Introduction
 
 - 论文表格压成 Markdown 时会保留数字，但 `rowspan` 的跨行表头不会合并，复杂表格可能列错位
 - PDF 里的图内标签（如模型结构图上的 `NSP` / `BERT`）可能作为短行混进正文，不影响章节结构
+- 视频链路依赖 `.env` 里的 `SUPADATA_API_KEY` 或 `GROQ_API_KEY`；两者都没有时只能走平台字幕，YouTube 本机 IP 被拦就会失败
+- YouTube 的兜底依赖 Invidious 公共实例；实例全挂时失败（2026-10-26 实测 `inv.nadeko.net` 无响应）
+- `--fast` 的概述来自按章采样，细节可能缺失；它不是逐章讲透的替代品
 - 抖音/小红书解析依赖页面结构，平台改版需跟进（历史上都跟上了）
 - 微博批量抓取会触发风控，单条链接使用稳定
 - 喜马拉雅付费内容不提供音频（版权墙，诚实报错而非假装失败）
