@@ -68,7 +68,7 @@
 | 播客 | 小宇宙 / 喜马拉雅 | 公开接口直取音频（付费内容诚实报付费墙） |
 | 社交帖 | X/Twitter | fxtwitter 公共镜像 API（免登录） |
 | 社交帖 | 微博 | 官方游客 cookie 自动领取 + 移动端 JSON 接口 |
-| 论文 | arXiv（链接或 ID） | 官方 HTML 全文 + 导出 API 元数据，保留章节层级与公式 |
+| 论文 | arXiv（链接或 ID） | 官方 HTML 全文 + 导出 API 元数据，保留章节层级、公式与表格 |
 | 网页 | 任意博客/文章 | HTML 抓取 + 正文区域提取（按文本密度打分，去导航/页脚/侧栏） |
 | 本地文件 | epub / pdf / docx / txt / md / srt / vtt / mp3 / mp4 / wav / webm | 直接解析 |
 | 本地文件 | 音视频（任意上面格式） | 直接进云端 ASR，秒级出时间戳逐字稿 |
@@ -203,7 +203,7 @@ ed/
   verify/
     skill_meta.py      产物元信息校验
 templates/             第一段/第二段的 prompt 模板
-tests/                 93 项回归测试
+tests/                 98 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -249,7 +249,7 @@ arXiv 官方会给论文生成 HTML 版（`arxiv.org/html/<id>`），带章节�
 
 - **章节层级是真的**：`<section>` / `<h2>` 就是论文的第 1、2、3 章，切块按章断开
 - **公式是 LaTeX 源**：`<math alttext="h_{t}">` 里存着原始公式，保留成 `$h_{t}$`
-- **图表标题保留**：图注里的结论读得到；表格里的数字矩阵丢掉（压成纯文本没有意义）
+- **表格保留**：实验数字大多在表格里，压成紧凑 Markdown（最多 30 行 / 12 列）；公式排版表还原成 `$$LaTeX$$`，不当作数据表
 - **元数据走官方导出 API**：标题、作者、年份、原始摘要
 
 整条路零 key、零登录、零模型。arXiv 没生成 HTML 的旧论文会明确告诉你「这篇没有 HTML 版，请给我 PDF」，不静默失败。
@@ -297,6 +297,7 @@ PDF 抽出的文本没有标题标记，所以会先认章节行（`Introduction
 
 ## 已知限制
 
+- 论文表格压成 Markdown 时会保留数字，但 `rowspan` 的跨行表头不会合并，复杂表格可能列错位
 - 抖音/小红书解析依赖页面结构，平台改版需跟进（历史上都跟上了）
 - 微博批量抓取会触发风控，单条链接使用稳定
 - 喜马拉雅付费内容不提供音频（版权墙，诚实报错而非假装失败）
@@ -369,7 +370,7 @@ Every cloud dependency has a free tier, and every link has fallback layers. For 
 | Podcast | Xiaoyuzhou / Ximalaya | Public API, honest paywall errors |
 | Social post | X/Twitter | fxtwitter public mirror API, no login |
 | Social post | Weibo | Auto-fetched guest cookie + mobile JSON API |
-| Paper | arXiv (link or ID) | Official HTML full text + export-API metadata, keeps section structure and formulas |
+| Paper | arXiv (link or ID) | Official HTML full text + export-API metadata, keeps section structure, formulas, and tables |
 | Web page | Any blog/article | HTML fetch + main-content extraction (text-density scoring, drops nav/footer/sidebar) |
 | Local files | epub / pdf / docx / txt / md / srt / vtt / mp3 / mp4 / wav / webm | Direct parsing |
 | Local media | Any of the above | Straight into cloud ASR, seconds to timestamped transcript |
@@ -460,7 +461,7 @@ arXiv generates an HTML edition of each paper (`arxiv.org/html/<id>`) with real 
 
 - **Section hierarchy is real** — `<section>` / `<h2>` *are* chapters 1, 2, 3, so chunking breaks on chapter boundaries
 - **Formulas stay as LaTeX** — `<math alttext="h_{t}">` carries the original source, kept as `$h_{t}$`
-- **Figure and table captions are kept** — the conclusion in a caption is readable; the numeric matrix inside a table is dropped (flattening it to text means nothing)
+- **Tables are kept** — experiment numbers usually live in tables; they become compact Markdown (max 30 rows / 12 columns). Equation-layout tables are restored as `$$LaTeX$$` instead of being treated as data tables
 - **Metadata comes from the official export API** — title, authors, year, original abstract
 
 The whole path needs no key, no login, no model. Older papers without an HTML edition get an explicit "this paper has no HTML version, give me the PDF" instead of a silent failure.

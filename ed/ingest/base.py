@@ -808,6 +808,9 @@ def load_xhs(url: str) -> Document:
 
     title = (r.get("title") or "").strip()
     desc = (r.get("desc") or "").strip()
+    # 小红书正文里会内嵌 `#话题[话题]#`，和下面统一渲染的标签行重复，先去掉
+    desc = re.sub(r"#[^#\s\[\]]+\[话题\]#", " ", desc)
+    desc = re.sub(r"[ \t]{2,}", " ", desc).strip()
     tags = [t for t in (r.get("tags") or []) if t]
     parts = []
     if title and title != desc:
@@ -853,7 +856,7 @@ def load_url(url: str) -> Document:
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.read().decode("utf-8", "replace")
 
-    if re.search(r"xiaohongshu\.com|xhslink\.com", url):
+    if re.search(r"xiaohongshu\.com|xhslink\.(?:com|cn)", url):
         return load_xhs(url)
 
     if re.search(r"weibo\.com|weibo\.cn|weibo\.com\.cn", url):

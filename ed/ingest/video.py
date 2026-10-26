@@ -41,7 +41,7 @@ PLATFORM_HINTS = [
     (r"youtube\.com|youtu\.be", "YouTube"),
     (r"bilibili\.com|b23\.tv", "B站"),
     (r"douyin\.com|iesdouyin\.com|v\.douyin\.com", "抖音"),
-    (r"xiaohongshu\.com|xhslink\.com", "小红书"),
+    (r"xiaohongshu\.com|xhslink\.(?:com|cn)", "小红书"),
     (r"tiktok\.com", "TikTok"),
     (r"weibo\.com|weibo\.tv", "微博"),
     (r"zhihu\.com", "知乎"),
@@ -564,7 +564,7 @@ def _is_douyin(url: str) -> bool:
 
 
 def _is_xhs(url: str) -> bool:
-    return bool(re.search(r"xiaohongshu\.com|xhslink\.com", url))
+    return bool(re.search(r"xiaohongshu\.com|xhslink\.(?:com|cn)", url))
 
 
 def _is_podcast(url: str) -> bool:

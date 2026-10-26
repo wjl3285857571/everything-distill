@@ -117,16 +117,21 @@ def fetch_meta(arxiv_id: str) -> Dict[str, str]:
 # ---------------------------------------------------------------- HTML → 文本
 
 _HEADING_TAGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4}
-# 这些容器里的文字不要（导航、脚本、表格数据、公式渲染符号）
-_SKIP_TAGS = {"script", "style", "nav", "table", "math", "svg"}
+# 这些容器里的文字不要（导航、脚本、公式渲染符号）
+_SKIP_TAGS = {"script", "style", "nav", "math", "svg"}
+
+# 表格保留上限：论文表格常有几十行，全塞进去会把上下文顶爆；
+# 前 30 行足够覆盖主要基线对比和消融。
+MAX_TABLE_ROWS = 30
+MAX_TABLE_COLS = 12
 
 
 class _LatexMLParser(HTMLParser):
     """把 LaTeXML 生成的论文页面压成带 markdown 标题的纯文本。
 
     保留：章节标题（#/##/###）、正文段落、公式的 LaTeX 源（math 的 alttext）、
-          图表标题（figcaption）、参考文献条目。
-    丢弃：导航条、表格里的数字矩阵、公式的排版符号。
+          图表标题（figcaption）、参考文献条目、表格（压成 Markdown，限行数）。
+    丢弃：导航条、公式的排版符号。
     """
 
     def __init__(self) -> None:
@@ -138,6 +143,14 @@ class _LatexMLParser(HTMLParser):
         self.in_caption = False
         self.in_bib = False
         self.captions: List[str] = []
+        # 表格状态
+        self.in_table = False
+        self.table_kind = "data"      # data | equation
+        self.eq_alt = ""
+        self.rows: List[List[str]] = []
+        self.row: List[str] = []
+        self.cell: List[str] = []
+        self.cell_span = 1
 
     # -- 工具
     def _flush(self, prefix: str = "") -> None:
@@ -156,9 +169,95 @@ class _LatexMLParser(HTMLParser):
                 return v or ""
         return ""
 
+    # -- 表格
+    def _cell_text(self) -> str:
+        s = re.sub(r"\s+", " ", "".join(self.cell)).strip()
+        return s.replace("|", "\\|")
+
+    def _flush_table(self) -> None:
+        rows = [r for r in self.rows if any(c.strip() for c in r)]
+        if not rows:
+            self.rows = []
+            return
+        total = len(rows)
+        rows = rows[:MAX_TABLE_ROWS]
+        ncol = min(max(len(r) for r in rows), MAX_TABLE_COLS)
+        if ncol == 0:
+            self.rows = []
+            return
+        norm = [(r + [""] * ncol)[:ncol] for r in rows]
+        lines = ["| " + " | ".join(norm[0]) + " |",
+                 "| " + " | ".join(["---"] * ncol) + " |"]
+        for r in norm[1:]:
+            lines.append("| " + " | ".join(r) + " |")
+        if total > MAX_TABLE_ROWS:
+            lines.append(f"*（表格共 {total} 行，只保留前 {MAX_TABLE_ROWS} 行）*")
+        self.out.append("\n".join(lines))
+        self.rows = []
+
+    def _table_start(self, tag: str, attrs) -> None:
+        if tag == "tr":
+            self.row = []
+        elif tag in ("td", "th"):
+            self.cell = []
+            raw = self._attr(attrs, "colspan") or "1"
+            try:
+                self.cell_span = max(1, min(int(raw), MAX_TABLE_COLS))
+            except ValueError:
+                self.cell_span = 1
+        elif tag == "math":
+            alt = self._attr(attrs, "alttext")
+            if not alt:
+                return
+            if self.table_kind == "equation":
+                # 公式的排队表：不渲染成表格，取第一条 LaTeX 源
+                if not self.eq_alt:
+                    self.eq_alt = alt
+            else:
+                self.cell.append(f" ${alt}$ ")
+
+    def _table_end(self, tag: str) -> None:
+        if tag in ("td", "th"):
+            self.row.append(self._cell_text())
+            # colspan 的格子占多列，补空位让后面的列对齐
+            for _ in range(self.cell_span - 1):
+                self.row.append("")
+            self.cell = []
+            self.cell_span = 1
+        elif tag == "tr":
+            if any(c.strip() for c in self.row):
+                self.rows.append(list(self.row))
+            self.row = []
+        elif tag == "table":
+            if self.table_kind == "equation":
+                if self.eq_alt:
+                    self.out.append(f"$$ {self.eq_alt} $$")
+            else:
+                self._flush_table()
+            self.in_table = False
+            self.table_kind = "data"
+            self.eq_alt = ""
+
     # -- HTMLParser 回调
     def handle_starttag(self, tag: str, attrs) -> None:
         cls = self._attr(attrs, "class")
+
+        if self.in_table:
+            self._table_start(tag, attrs)
+            return
+        if tag == "table":
+            if self.skip:
+                self.skip += 1
+                return
+            self._flush()
+            self.in_table = True
+            low = (cls or "").lower()
+            self.table_kind = ("equation"
+                               if ("ltx_equation" in low or "ltx_eqn" in low)
+                               else "data")
+            self.eq_alt = ""
+            self.rows, self.row, self.cell = [], [], []
+            return
 
         # 文档大标题和 "Abstract" 字样不重复输出（元数据里已有）
         if tag in ("h1", "h6") and (
@@ -216,6 +315,9 @@ class _LatexMLParser(HTMLParser):
             self.cur.append("- ")
 
     def handle_endtag(self, tag: str) -> None:
+        if self.in_table:
+            self._table_end(tag)
+            return
         if self.skip:
             self.skip -= 1
             return
@@ -229,6 +331,10 @@ class _LatexMLParser(HTMLParser):
             self.in_caption = False
 
     def handle_data(self, data: str) -> None:
+        if self.in_table:
+            if not self.skip:
+                self.cell.append(data)
+            return
         if self.skip or not data:
             return
         # 标题里的章节编号 span 会混进来，保留（方便定位），只压空白

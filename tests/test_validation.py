@@ -330,6 +330,57 @@ class TestXhsText(unittest.TestCase):
         self.assertEqual(got, "DOC")
         m.assert_called_once()
 
+    def test_xhslink_cn_is_recognized(self):
+        """真实分享短链是 xhslink.cn，以前只认 .com，会掉进通用网页分支。"""
+        from ed.ingest.base import load_url
+        with patch("ed.ingest.base.load_xhs", return_value="DOC") as m:
+            got = load_url("https://xhslink.cn/o/352xomSfhNY")
+        self.assertEqual(got, "DOC")
+        m.assert_called_once()
+
+
+class TestArxivTables(unittest.TestCase):
+    def test_th_and_td_become_markdown(self):
+        from ed.ingest.arxiv import latexml_to_text
+        html = ('<article class="ltx_document"><table>'
+                '<tr><th>Model</th><th>BLEU</th></tr>'
+                '<tr><td>Ours</td><td>28.4</td></tr>'
+                '</table></article>')
+        t = latexml_to_text(html)
+        self.assertIn("| Model | BLEU |", t)
+        self.assertIn("| Ours | 28.4 |", t)
+
+    def test_colspan_keeps_column_alignment(self):
+        from ed.ingest.arxiv import latexml_to_text
+        html = ('<article class="ltx_document"><table>'
+                '<tr><td colspan="2">Wide</td><td>C</td></tr>'
+                '<tr><td>A</td><td>B</td><td>C</td></tr>'
+                '</table></article>')
+        t = latexml_to_text(html)
+        self.assertIn("| Wide |  | C |", t)
+        self.assertIn("| A | B | C |", t)
+
+    def test_equation_table_becomes_formula_not_table(self):
+        from ed.ingest.arxiv import latexml_to_text
+        html = ('<article class="ltx_document">'
+                '<table class="ltx_equation ltx_eqn_table"><tr>'
+                '<td><math alttext="h_{t}"></math>h_t</td><td>(1)</td>'
+                '</tr></table></article>')
+        t = latexml_to_text(html)
+        self.assertIn("$$ h_{t} $$", t)
+        self.assertNotIn("| --- |", t)
+
+    def test_long_table_is_capped(self):
+        from ed.ingest.arxiv import latexml_to_text
+        rows = "".join(
+            f"<tr><td>row{i}</td><td>{i}</td></tr>" for i in range(40))
+        t = latexml_to_text(
+            f'<article class="ltx_document"><table>{rows}</table></article>')
+        self.assertIn("row0", t)
+        self.assertIn("row29", t)
+        self.assertNotIn("row30", t)
+        self.assertIn("只保留前 30 行", t)
+
 
 class TestRelevanceCap(unittest.TestCase):
     def test_today_respects_total_cap(self):

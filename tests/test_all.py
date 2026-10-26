@@ -600,11 +600,13 @@ class TestArxiv(unittest.TestCase):
         t = latexml_to_text(self.HTML)
         self.assertIn("$x_{t}$", t)
 
-    def test_table_cells_dropped_caption_kept(self):
+    def test_table_cells_kept_as_markdown(self):
+        """表格里是实验数字，整表丢掉会让 result 类条目写不出数字。"""
         from ed.ingest.arxiv import latexml_to_text
         t = latexml_to_text(self.HTML)
         self.assertIn("Table 1: Results table.", t)
-        self.assertNotIn("0.99", t)
+        self.assertIn("0.99", t)
+        self.assertIn("| --- |", t)
 
     def test_bibliography_items_become_list(self):
         from ed.ingest.arxiv import latexml_to_text

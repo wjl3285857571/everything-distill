@@ -91,7 +91,7 @@ def _from_cn(url: str) -> Dict[str, Any]:
             return {"ok": False, "reason": info.get("reason", "")}
         except ValueError as e:
             return {"ok": False, "reason": str(e)}
-    if re.search(r"xiaohongshu\.com|xhslink\.com", url):
+    if re.search(r"xiaohongshu\.com|xhslink\.(?:com|cn)", url):
         from .cn_platforms import xhs_parse_note
         r = xhs_parse_note(url)
         if r.get("ok"):
