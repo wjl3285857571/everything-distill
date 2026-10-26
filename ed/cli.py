@@ -462,6 +462,27 @@ def cmd_narrate(args) -> int:
     return 0 if report["通过"] else 2
 
 
+def cmd_package(args) -> int:
+    from .render.skill import build_skill
+    from .verify.skill_meta import check_skill
+    stage1 = workspace.load_stage1(args.workdir)
+    slug, text = build_skill(stage1, name=args.name)
+    outdir = os.path.join(args.out, slug)
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "SKILL.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    r = check_skill(outdir)
+    print(f"✓ {path} （{len(text):,} 字符，"
+          f"description {r.get('description_字数', '?')} 字）")
+    if r["通过"]:
+        print("  ✓ 六段结构与 front matter 通过")
+        return 0
+    for p in r["问题"]:
+        print(f"  ⚠ {p}")
+    return 2
+
+
 def cmd_run(args) -> int:
     rc = cmd_ingest(args)
     if rc:
@@ -509,6 +530,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--workdir", required=True)
     common(p)
     p.set_defaults(func=cmd_narrate)
+
+    p = sub.add_parser("package", help="打包成 AI 可调用的 SKILL.md")
+    p.add_argument("--workdir", required=True)
+    p.add_argument("--out", required=True,
+                   help="输出目录（下面会建 <name>/SKILL.md）")
+    p.add_argument("--name", default=None,
+                   help="技能名：小写英文/数字 + 连字符")
+    p.set_defaults(func=cmd_package)
 
     p = sub.add_parser("stage2", help="第二段：结合处境")
     p.add_argument("--workdir", required=True)
@@ -607,7 +636,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("check-skill", help="检查一个 skill 的元信息合规性")
     p.add_argument("path", help="skill 目录")
-    p.add_argument("--kind", default="manual", choices=["manual", "package"],
+    p.add_argument("--kind", default="package", choices=["manual", "package"],
                    help="manual=编排手册形态；package=AI 可调用的技能包形态")
     p.set_defaults(func=cmd_check_skill)
 

@@ -137,6 +137,9 @@ python3 -m ed narrate --workdir runs/书名
 
 # ... 第一段、第二段同上
 python3 -m ed render --workdir runs/书名 --out 书名-讲述版.md
+
+# 给 AI 用的技能包（可以和讲述版都出）
+python3 -m ed package --workdir runs/书名 --out runs/书名/技能包 --name book-skill
 ```
 
 `narrate` 按章节分组，每部分让模型写 1200–2500 字连贯正文。产物里**不会**再出现
@@ -149,14 +152,21 @@ python3 -m ed metadata "https://youtu.be/xxxx"        # 标题/作者/章节
 python3 -m ed frames "https://youtu.be/xxxx" --at 00:12:30 --scene   # 局部抽帧
 ```
 
-### 两种产物形态
+### 三种产物形态
 
-同一份内容可以出两种文档，取决于有没有跑 `narrate`：
+同一份内容可以出三种文档，按用途选：
 
-| 形态 | 触发 | 正文长什么样 | 适合 |
+| 形态 | 怎么出 | 正文长什么样 | 适合 |
 |---|---|---|---|
-| **讲述版** | 有 `narrate.json` | 按章分节，每节 1200–2500 字连贯正文，关键处引原文 | 读书、看长文，想被讲透 |
-| **卡片版** | 没跑 narrate | 结构表 + 关键洞察列表（每条一句 + 原文） | 快速检索、当知识库 |
+| **讲述版** | 跑 `narrate` | 按章分节，每节 1200–2500 字连贯正文，关键处引原文 | 读书、看长文，想被讲透 |
+| **卡片版** | 只跑 `stage1`/`stage2` | 结构表 + 关键洞察列表（每条一句 + 原文） | 快速检索、当知识库 |
+| **AI 技能包** | 跑 `package` | 六段结构：什么时候用它 / 核心判断 / 怎么做 / 判断标准 / 什么时候不该用它 / 出处 | 拿给 AI 调用、做成 skill |
+
+**触发方式**（对人说，也对 AI 说）：
+
+- 「讲给我听」「我想读懂」「蒸给我看」→ 讲述版
+- 「蒸给 AI」「拿给 AI 看」「做成 skill / 技能包」→ 跑 `package`
+- 没说清楚：书和长文默认讲述版，短内容默认卡片版
 
 小说和名著请用讲述版。卡片版会把人物和情节压成「原则/案例」，那是把小说讲坏。
 
@@ -227,10 +237,11 @@ ed/
     select.py          机械筛选（轮转采样）
   render/
     document.py        最终文档渲染（分档 / 依据 / 去重）
+    skill.py           打包成 AI 可调用的 SKILL.md
   verify/
     skill_meta.py      产物元信息校验
 templates/             第一段/第二段的 prompt 模板 + narrate_system.md
-tests/                 123 项回归测试
+tests/                 125 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -458,18 +469,28 @@ python3 -m ed narrate --workdir runs/book
 
 # ... stage 1 / stage 2 as above
 python3 -m ed render --workdir runs/book --out book-narrative.md
+
+# AI-facing skill package (can be produced alongside the narrative)
+python3 -m ed package --workdir runs/book --out runs/book/skills --name book-skill
 ```
 
 `narrate` groups blocks by chapter and asks for 1200–2500 characters of connected prose per
 part. The output **no longer** contains a 200-item insight-card list — that shape suits a
 knowledge base, not a person reading.
 
-### Two output shapes
+### Three output shapes
 
-| Shape | Trigger | Body | Best for |
+| Shape | How | Body | Best for |
 |---|---|---|---|
-| **Narrative** | `narrate.json` exists | Chapter sections, 1200–2500 characters of prose each, key quotes inline | Books and long reads you want explained |
-| **Cards** | no narrate run | Structure table + insight list (one line + source quote each) | Fast lookup, knowledge base |
+| **Narrative** | run `narrate` | Chapter sections, 1200–2500 characters of prose each, key quotes inline | Books and long reads you want explained |
+| **Cards** | `stage1`/`stage2` only | Structure table + insight list (one line + source quote each) | Fast lookup, knowledge base |
+| **AI skill package** | run `package` | Six sections: when to use / core judgments / how to do it / decision criteria / when not to use / sources | Handing to an AI, installing as a skill |
+
+Trigger phrases (for humans and agents):
+
+- "explain it to me" / "I want to understand it" → narrative
+- "distill for AI" / "make it a skill" → `package`
+- unspecified: books and long reads default to narrative; short content defaults to cards
 
 Use narrative for fiction and classics. The card shape compresses characters and plot into
 "principles/cases", which ruins a novel.

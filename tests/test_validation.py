@@ -676,6 +676,45 @@ class TestNarrate(unittest.TestCase):
         self.assertNotIn("卡片式洞察", md)
 
 
+class TestSkillPackage(unittest.TestCase):
+    def _stage1(self):
+        return Stage1(
+            source=Source(kind="text", origin="x", title="纳瓦尔宝典"),
+            overview="这本书讲财富与幸福。",
+            insights=[
+                Insight(id="I1", claim="把自己产品化", type="principle",
+                        boundary="作者仅在硅谷语境下说", support="原文一句"),
+                Insight(id="I2", claim="用杠杆放大", type="framework",
+                        detail="先找专长，再加杠杆"),
+            ],
+            counter_examples=[Insight(id="C1", claim="不要把时间出租",
+                                      type="counter")],
+            glossary=[{"term": "杠杆", "definition": "无需许可的放大器"}],
+        )
+
+    def test_build_and_check(self):
+        from ed.render.skill import build_skill
+        from ed.verify.skill_meta import check_skill
+        slug, text = build_skill(self._stage1())
+        self.assertTrue(text.startswith("---"))
+        for sec in ("什么时候用它", "核心判断", "怎么做", "判断标准",
+                    "什么时候不该用它", "出处"):
+            self.assertIn(f"## {sec}", text)
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, slug)
+            os.makedirs(out)
+            with open(os.path.join(out, "SKILL.md"), "w",
+                      encoding="utf-8") as f:
+                f.write(text)
+            r = check_skill(out)
+        self.assertTrue(r["通过"], r["问题"])
+
+    def test_slugify_falls_back_for_chinese(self):
+        from ed.render.skill import slugify
+        self.assertEqual(slugify("纳瓦尔宝典"), "distilled-skill")
+        self.assertEqual(slugify("Naval's Almanack"), "naval-s-almanack")
+
+
 class TestFooter(unittest.TestCase):
     def test_no_personal_claim_without_stage2(self):
         """没有个人化内容时，页脚不该说「个人化结论均挂依据」。"""
