@@ -37,7 +37,12 @@ def normalize(s: str) -> str:
 
     中文引号必须处理——模型引用时常自己加「」《》，原文里没有，
     不处理会导致锚点整体错位一位。
+
+    英文断行连字符也在这里接上：PDF/EPUB 里 `trans-\nformer`
+    归一化后是 `trans-former`，而模型会还原成 `transformer`，
+    不接上会让真实摘录匹配失败。
     """
+    s = re.sub(r"-\s*\n\s*", "", s)
     s = re.sub(r"\s+", "", s)
     s = s.replace("“", '"').replace("”", '"')
     s = s.replace("‘", "'").replace("’", "'")
@@ -51,20 +56,27 @@ def normalize(s: str) -> str:
 
 
 def anchor_hit(excerpt: str, block_text: str) -> bool:
-    """摘录是否在块原文中。先试前 30 字锚点，再退到任意 12 字窗口。"""
+    """摘录是否真的在块原文里（归一化后整段包含）。
+
+    以前是「任意 12 字窗口命中就算过」：一句真话后面接一大段编造，
+    或者英文里撞上一个常见短语，都能混过去。现在要求整段出现；
+    只有模型用省略号主动跳过中间内容时，才逐段核对（每段至少 8 字）。
+    """
     ne = normalize(excerpt)
     nb = normalize(block_text)
     if not ne or not nb:
         return False
     if ne in nb:
         return True
-    anchor = ne[:30] if len(ne) > 30 else ne
-    if anchor and anchor in nb:
+    parts = [p for p in re.split(r"(?:\.\.\.|…)+", ne) if len(p) >= 8]
+    if len(parts) >= 2:
+        pos = 0
+        for p in parts:
+            i = nb.find(p, pos)
+            if i < 0:
+                return False
+            pos = i + len(p)
         return True
-    if len(ne) >= 12:
-        for i in range(0, max(1, len(ne) - 12)):
-            if ne[i:i + 12] in nb:
-                return True
     return False
 
 

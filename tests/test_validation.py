@@ -16,7 +16,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from ed.distill.stage1 import (  # noqa: E402
-    build_system_prompt, check_batch_receipts, run_stage1, verify_stage1)
+    anchor_hit, build_system_prompt, check_batch_receipts, normalize,
+    run_stage1, verify_stage1)
 from ed.distill.stage2 import verify_stage2  # noqa: E402
 from ed.ingest.base import (Block, Document, read_docx,  # noqa: E402
                             read_transcript_json)
@@ -241,6 +242,32 @@ class TestSupadataEncoding(unittest.TestCase):
         self.assertIn("list%3DPL1", u)
         self.assertIn("index%3D4", u)
         self.assertNotIn("&list=", u)
+
+
+class TestExcerptStrictness(unittest.TestCase):
+    def test_fabricated_tail_is_rejected(self):
+        """真话后面接一段编造，以前靠 12 字窗口能过，现在必须失败。"""
+        real = "这是真实原文里的一句话。"
+        quote = real + "后面这段完全是模型编出来的内容，原文里没有。"
+        self.assertFalse(anchor_hit(quote, real))
+
+    def test_elided_quote_with_real_fragments_passes(self):
+        src = ("第一段真实内容讲了一个问题，中间省略的部分也在原文里，"
+               "最后一段真实内容给出了结论。")
+        quote = "第一段真实内容讲了一个问题……最后一段真实内容给出了结论。"
+        self.assertTrue(anchor_hit(quote, src))
+
+    def test_english_hyphenation_is_joined(self):
+        """PDF 断行 trans-\\nformer 归一化后应能和 transformer 对上。"""
+        self.assertEqual(normalize("trans-\nformer"), normalize("transformer"))
+        self.assertTrue(anchor_hit("transformer architecture",
+                                   "the trans-\nformer architecture is used"))
+
+    def test_noncontiguous_common_words_do_not_pass(self):
+        """两个常见词分别出现过、但不连在一起，不能算命中。"""
+        self.assertFalse(anchor_hit(
+            "model architecture",
+            "the model is large and the architecture is deep"))
 
 
 class TestRunnerFactory(unittest.TestCase):
