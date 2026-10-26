@@ -11,6 +11,7 @@
 
 import json
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ class ChapterNote:
     quotes: List[Dict[str, Any]] = field(default_factory=list)
     blocks: List[int] = field(default_factory=list)
     dropped_quotes: int = 0
+    external_refs: List[str] = field(default_factory=list)
     error: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -48,6 +50,8 @@ class ChapterNote:
             "blocks": self.blocks,
             "dropped_quotes": self.dropped_quotes,
         }
+        if self.external_refs:
+            d["external_refs"] = self.external_refs
         if self.error:
             d["error"] = self.error
         return d
@@ -95,9 +99,14 @@ def _render_blocks(blocks: List) -> str:
     return "\n".join(out)
 
 
-def _user_prompt(blocks: List) -> str:
+def _user_prompt(doc: Document, blocks: List) -> str:
     span = f"块 {blocks[0].index}–{blocks[-1].index}"
-    return (f"## 这一部分的范围\n\n{span}，共 {len(blocks)} 块。\n\n"
+    meta = ""
+    if doc.source.title:
+        meta += f"书名/标题：{doc.source.title}\n"
+    if doc.source.author:
+        meta += f"作者：{doc.source.author}\n"
+    return (f"## 这一部分的范围\n\n{meta}{span}，共 {len(blocks)} 块。\n\n"
             f"## 原文\n\n{_render_blocks(blocks)}")
 
 
@@ -108,7 +117,8 @@ def _int_or_none(value) -> Optional[int]:
         return None
 
 
-def _make_note(data: Dict[str, Any], blocks: List) -> ChapterNote:
+def _make_note(data: Dict[str, Any], blocks: List,
+               source_title: str = "") -> ChapterNote:
     group_text = "\n".join(b.text for b in blocks)
     title = str(data.get("title") or blocks[0].heading or "正文").strip()
     if len(title) > 24:
@@ -140,15 +150,21 @@ def _make_note(data: Dict[str, Any], blocks: List) -> ChapterNote:
         blocks=[b.index for b in blocks],
         dropped_quotes=dropped,
     )
+    # 正文里提到的书名，原文没出现、也不是本书 → 多半是模型拿外部知识套的
+    for name in sorted(set(re.findall(r"《([^》]{1,30})》", prose))):
+        if name in group_text or name in source_title:
+            continue
+        note.external_refs.append(name)
     if not prose:
         note.error = "模型没有返回 prose"
     return note
 
 
 def run_narrate(doc: Document, runner: Runner, workers: int = 4,
-                progress=None) -> Tuple[List[ChapterNote], Dict[str, Any]]:
+                progress=None,
+                max_chars: int = 18000) -> Tuple[List[ChapterNote], Dict[str, Any]]:
     system = load_template("narrate_system.md")
-    groups = group_blocks(doc)
+    groups = group_blocks(doc, max_chars=max_chars)
     results: List[Optional[ChapterNote]] = [None] * len(groups)
     lock = threading.Lock()
     done = [0]
@@ -156,8 +172,9 @@ def run_narrate(doc: Document, runner: Runner, workers: int = 4,
     def work(item):
         i, blocks = item
         try:
-            raw = runner.run(system, _user_prompt(blocks))
-            note = _make_note(parse_json_loose(raw), blocks)
+            raw = runner.run(system, _user_prompt(doc, blocks))
+            note = _make_note(parse_json_loose(raw), blocks,
+                              source_title=doc.source.title or "")
         except Exception as e:
             note = ChapterNote(
                 title=(blocks[0].heading or f"第 {i + 1} 部分"),
@@ -188,6 +205,7 @@ def run_narrate(doc: Document, runner: Runner, workers: int = 4,
         "失败": len(failed),
         "失败明细": [{"title": n.title, "error": n.error} for n in failed][:10],
         "作废引用": sum(n.dropped_quotes for n in notes),
+        "外部引用": sum(len(n.external_refs) for n in notes),
         "总字数": sum(len(n.prose) for n in notes),
         "通过": bool(notes) and not failed and produced == len(notes),
     }

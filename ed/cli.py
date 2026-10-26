@@ -196,7 +196,13 @@ def _workdir_failures(workdir: str, mem_dir: str) -> List[str]:
 
 
 def cmd_render(args) -> int:
-    stage1 = workspace.load_stage1(args.workdir)
+    p1 = os.path.join(args.workdir, "stage1.json")
+    if os.path.exists(p1):
+        stage1 = workspace.load_stage1(args.workdir)
+    else:
+        # 只做讲述、不做洞察抽取时，没有 stage1.json 也能渲染
+        from .schema import Stage1
+        stage1 = Stage1(source=workspace.load_document(args.workdir).source)
     stage2 = None
     p = os.path.join(args.workdir, "stage2.json")
     if os.path.exists(p):

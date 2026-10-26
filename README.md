@@ -160,6 +160,9 @@ python3 -m ed frames "https://youtu.be/xxxx" --at 00:12:30 --scene   # 局部抽
 
 小说和名著请用讲述版。卡片版会把人物和情节压成「原则/案例」，那是把小说讲坏。
 
+讲述版也会防模型乱补：引用必须逐字对得上原文；正文里出现原文没有的书名，会被记成
+「外部引用」写进校验报告（提示模型可能拿外部知识套了这本书）。
+
 ### 校验没过时会怎样
 
 `collect` / `stage1` / `stage2` 只要有一项没通过（缺回执、条数不符、批次失败、
@@ -223,7 +226,7 @@ ed/
   verify/
     skill_meta.py      产物元信息校验
 templates/             第一段/第二段的 prompt 模板 + narrate_system.md
-tests/                 119 项回归测试
+tests/                 121 项回归测试
 ```
 
 ## 实测性能（Apple M5）

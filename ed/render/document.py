@@ -306,6 +306,11 @@ def render(
                 if para:
                     L.append(para)
                     L.append("")
+            refs = ch.get("external_refs") or []
+            if refs:
+                L.append(f"> ⚠ 这一部分提到原文里没有的书名"
+                         f"（{'、'.join(refs)}），可能是模型的补充，引用前请核实。")
+                L.append("")
             for q in ch.get("quotes") or []:
                 text = (q.get("text") or "").strip()
                 if not text:

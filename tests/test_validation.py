@@ -638,6 +638,27 @@ class TestNarrate(unittest.TestCase):
         self.assertEqual(len(notes[0].quotes), 1)
         self.assertIn("第一段", notes[0].prose)
 
+    def test_external_title_flagged(self):
+        from ed.distill.narrate import _make_note
+        blocks = [Block(index=1, text="阿莉莎走进花园。", heading="第一章", words=9)]
+        note = _make_note(
+            {"title": "t", "prose": "《窄门》讲的是阿莉莎；《红与黑》是另一本书。",
+             "quotes": []},
+            blocks, source_title="窄门")
+        self.assertIn("红与黑", note.external_refs)
+        self.assertNotIn("窄门", note.external_refs)
+
+    def test_external_ref_warning_rendered(self):
+        from ed.render.document import render
+        md = render(Stage1(source=Source(kind="text", origin="x", title="x")),
+                    None, narration=[{
+                        "title": "第一章", "summary": "s",
+                        "prose": "正文。",
+                        "external_refs": ["红与黑"],
+                    }])
+        self.assertIn("原文里没有的书名", md)
+        self.assertIn("红与黑", md)
+
     def test_render_narration_hides_insight_cards(self):
         from ed.render.document import render
         s1 = Stage1(source=Source(kind="text", origin="x", title="x"),
