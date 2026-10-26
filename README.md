@@ -16,7 +16,7 @@
 一、这内容在讲什么        ← 30 秒概览
 二、怎么切进去            ← 初次理解的建议（1-3 条）
 三、内容本身              ← 结构 / 关键洞察 / 失效场景 / 专有名词（主体）
-四、跟你有关              ← 「眼下能用得上」+「值得想」两档，封顶 30 条
+四、跟你有关              ← 眼下能用得上 / 值得想 / 存着，三档，封顶 30 条
 依据                      ← 论文式编号引用，正文 [1] 可跳转
 ```
 
@@ -203,7 +203,7 @@ ed/
   verify/
     skill_meta.py      产物元信息校验
 templates/             第一段/第二段的 prompt 模板
-tests/                 106 项回归测试
+tests/                 108 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -334,7 +334,7 @@ PDF 抽出的文本没有标题标记，所以会先认章节行（`Introduction
 1. What is this about          ← 30-second overview
 2. How to approach it          ← 1–3 entry suggestions
 3. The content itself          ← structure / key insights / failure modes / glossary
-4. What it means for you       ← "usable today" + "worth thinking" tiers, capped at 30
+4. What it means for you       ← "usable today" / "worth thinking" / "keep for later" tiers, capped at 30
 References                     ← numbered citations, [1] jumps back
 ```
 

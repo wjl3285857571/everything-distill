@@ -151,6 +151,8 @@ class _LatexMLParser(HTMLParser):
         self.row: List[str] = []
         self.cell: List[str] = []
         self.cell_span = 1
+        self.cell_rowspan = 1
+        self.rowspan_carry: Dict[int, tuple] = {}
 
     # -- 工具
     def _flush(self, prefix: str = "") -> None:
@@ -195,6 +197,17 @@ class _LatexMLParser(HTMLParser):
         self.out.append("\n".join(lines))
         self.rows = []
 
+    def _emit_carry(self) -> None:
+        """把上一行 rowspan 还没用完的单元格补到当前列。"""
+        while len(self.row) in self.rowspan_carry:
+            idx = len(self.row)
+            text, remaining = self.rowspan_carry[idx]
+            self.row.append(text)
+            if remaining <= 1:
+                self.rowspan_carry.pop(idx, None)
+            else:
+                self.rowspan_carry[idx] = (text, remaining - 1)
+
     def _table_start(self, tag: str, attrs) -> None:
         if tag == "tr":
             self.row = []
@@ -205,6 +218,11 @@ class _LatexMLParser(HTMLParser):
                 self.cell_span = max(1, min(int(raw), MAX_TABLE_COLS))
             except ValueError:
                 self.cell_span = 1
+            raw = self._attr(attrs, "rowspan") or "1"
+            try:
+                self.cell_rowspan = max(1, min(int(raw), MAX_TABLE_ROWS))
+            except ValueError:
+                self.cell_rowspan = 1
         elif tag == "math":
             alt = self._attr(attrs, "alttext")
             if not alt:
@@ -218,13 +236,20 @@ class _LatexMLParser(HTMLParser):
 
     def _table_end(self, tag: str) -> None:
         if tag in ("td", "th"):
-            self.row.append(self._cell_text())
+            self._emit_carry()
+            col = len(self.row)
+            text = self._cell_text()
+            self.row.append(text)
             # colspan 的格子占多列，补空位让后面的列对齐
             for _ in range(self.cell_span - 1):
                 self.row.append("")
+            if self.cell_rowspan > 1:
+                self.rowspan_carry[col] = (text, self.cell_rowspan - 1)
             self.cell = []
             self.cell_span = 1
+            self.cell_rowspan = 1
         elif tag == "tr":
+            self._emit_carry()
             if any(c.strip() for c in self.row):
                 self.rows.append(list(self.row))
             self.row = []
@@ -257,6 +282,7 @@ class _LatexMLParser(HTMLParser):
                                else "data")
             self.eq_alt = ""
             self.rows, self.row, self.cell = [], [], []
+            self.rowspan_carry = {}
             return
 
         # 文档大标题和 "Abstract" 字样不重复输出（元数据里已有）

@@ -363,7 +363,7 @@ def render(
         L.append(f"## {CN[num['me']-1]}、跟你有关")
         L.append("")
         if stage2.relevant:
-            # 两档：眼下能用得上 / 值得想。上限 30 条——
+            # 三档：今天能用 / 值得想 / 存着。上限 30 条——
             # 这节是「内容对你的投影」，不是正文主体；条目一多必然互相重复，
             # 读者的注意力就该花在第三节的蒸馏本身上。
             picked = _pick_relevant(stage2.relevant, cap=30)
@@ -372,6 +372,8 @@ def render(
                  "正在处理的事，读完能立刻改一个做法。"),
                 ("think", "值得想",
                  "下次复盘、下次遇到类似情况时会想起来的角度和判断标准。"),
+                ("later", "存着，以后可能用",
+                 "现在用不上，但某天真要做那件事时是有价值的地图。"),
             ]
             buckets: Dict[str, List[Dict[str, Any]]] = {k: [] for k, _, _ in tiers}
             for r in stage2.relevant:

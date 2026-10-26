@@ -448,6 +448,17 @@ class TestArxivTables(unittest.TestCase):
         self.assertIn("| Wide |  | C |", t)
         self.assertIn("| A | B | C |", t)
 
+    def test_rowspan_repeats_group_label(self):
+        """跨行的分组标签要在每一行都出现，否则 Markdown 表读不出归属。"""
+        from ed.ingest.arxiv import latexml_to_text
+        html = ('<article class="ltx_document"><table>'
+                '<tr><td rowspan="2">Group</td><td>A</td></tr>'
+                '<tr><td>B</td></tr>'
+                '</table></article>')
+        t = latexml_to_text(html)
+        self.assertIn("| Group | A |", t)
+        self.assertIn("| Group | B |", t)
+
     def test_equation_table_becomes_formula_not_table(self):
         from ed.ingest.arxiv import latexml_to_text
         html = ('<article class="ltx_document">'
@@ -492,6 +503,20 @@ class TestSelectPaperTypes(unittest.TestCase):
                               self._mk("principle", "P")])
         r = select(s1, max_total=1)
         self.assertEqual(r["insights"][0].id, "P")
+
+
+class TestLaterTier(unittest.TestCase):
+    def test_later_has_own_section(self):
+        """later 不该被悄悄归进「值得想」。"""
+        from ed.render.document import render
+        s2 = Stage2(
+            relevant=[{"insight_id": "I1", "why": "LATER_SENTINEL",
+                       "basis": [1], "horizon": "later"}],
+            basis=[Basis(id=1, kind="content", source="s", quote="q")],
+        )
+        md = render(Stage1(source=Source(kind="text", origin="x", title="x")), s2)
+        self.assertIn("存着，以后可能用", md)
+        self.assertIn("LATER_SENTINEL", md)
 
 
 class TestRelevanceCap(unittest.TestCase):
