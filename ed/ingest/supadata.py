@@ -65,15 +65,20 @@ def _merge_segments(segs: List[Dict[str, Any]],
     return out
 
 
-def build_request_url(url: str) -> str:
+def build_request_url(url: str, lang: Optional[str] = None) -> str:
     """把视频 URL 正确编码进 Supadata 查询参数。
 
     单独抽成函数是为了能测：带 `&list=` / `&index=` 的链接必须完整保留。
+    `lang` 可选：中文视频默认轨常是英文机翻轨，指定 zh 才能拿原声。
     """
-    return f"{API_URL}?{urllib.parse.urlencode({'url': url})}"
+    params: Dict[str, str] = {"url": url}
+    if lang:
+        params["lang"] = lang
+    return f"{API_URL}?{urllib.parse.urlencode(params)}"
 
 
-def fetch_transcript_supadata(url: str) -> Dict[str, Any]:
+def fetch_transcript_supadata(url: str,
+                              lang: Optional[str] = None) -> Dict[str, Any]:
     """Supadata 转录。返回 {"ok", "text", "segments", "via"} 或失败原因。
 
     失败的 reason_code 约定：
@@ -89,7 +94,7 @@ def fetch_transcript_supadata(url: str) -> Dict[str, Any]:
     import subprocess
     p = subprocess.run(
         ["curl", "-s", "--max-time", "120",
-         build_request_url(url),
+         build_request_url(url, lang=lang),
          "-H", f"x-api-key: {key}"],
         capture_output=True, text=True, timeout=150)
     raw = p.stdout.strip()

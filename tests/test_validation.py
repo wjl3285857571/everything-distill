@@ -326,6 +326,11 @@ class TestSupadataEncoding(unittest.TestCase):
         self.assertIn("index%3D4", u)
         self.assertNotIn("&list=", u)
 
+    def test_lang_is_forwarded(self):
+        u = build_request_url("https://youtu.be/x", lang="zh")
+        self.assertIn("lang=zh", u)
+        self.assertIn("url=https%3A%2F%2Fyoutu.be%2Fx", u)
+
 
 class TestExcerptStrictness(unittest.TestCase):
     def test_fabricated_tail_is_rejected(self):
@@ -351,6 +356,16 @@ class TestExcerptStrictness(unittest.TestCase):
         self.assertFalse(anchor_hit(
             "model architecture",
             "the model is large and the architecture is deep"))
+
+    def test_added_punctuation_passes(self):
+        """自动字幕原文没标点，模型引用时补了逗号，不应判死。"""
+        self.assertTrue(anchor_hit("我们, 不是, 陌生人", "我们不是陌生人"))
+
+    def test_quote_across_timestamps_passes(self):
+        """引用跨过 [HH:MM:SS] 时间戳时，时间戳不应参与比对。"""
+        src = "[00:00:01] 第一句\n[00:00:05] 第二句"
+        self.assertTrue(anchor_hit(
+            "[00:00:01] 第一句 [00:00:05] 第二句", src))
 
 
 class TestWebExtraction(unittest.TestCase):
@@ -747,9 +762,9 @@ class TestBrief(unittest.TestCase):
 
     def test_long_uses_sections_and_synthesis(self):
         from ed.distill.brief import run_brief
-        b1 = Block(index=1, text="甲" * 4000, heading="第一章")
-        b2 = Block(index=2, text="乙" * 4000, heading="第二章")
-        doc = self._doc(text="甲" * 4000 + "乙" * 4000,
+        b1 = Block(index=1, text="甲" * 2000, heading="第一章")
+        b2 = Block(index=2, text="乙" * 2000, heading="第二章")
+        doc = self._doc(text="甲" * 2000 + "乙" * 2000,
                         blocks=[b1, b2], title="长书")
         r = FakeRunner([
             json.dumps({"title": "第一章", "gist": "第一章讲甲。" * 10},
@@ -775,6 +790,16 @@ class TestBrief(unittest.TestCase):
         from ed.cli import _is_short
         self.assertTrue(_is_short("短" * 100))
         self.assertFalse(_is_short("长" * 3001))
+
+    def test_large_single_block_is_split(self):
+        from ed.distill.brief import _brief_groups
+        text = "一句原文。\n" * 2000
+        block = Block(index=1, text=text, heading="全文")
+        doc = self._doc(text=text, blocks=[block])
+        groups = _brief_groups(doc, max_chars=5000)
+        self.assertGreaterEqual(len(groups), 2)
+        for g in groups:
+            self.assertLessEqual(sum(len(b.text) for b in g), 5500)
 
     def test_brief_becomes_narrative_overview(self):
         from ed.render.document import render
@@ -805,6 +830,21 @@ class TestBrief(unittest.TestCase):
         self.assertEqual(report["模式"], "快速")
         self.assertEqual(len(r.prompts), 1)
         self.assertTrue(report["通过"])
+
+
+class TestNarrateGuard(unittest.TestCase):
+    def test_long_prose_is_reported(self):
+        from ed.distill.narrate import run_narrate
+        block = Block(index=1, text="原文" * 100, heading="第一章")
+        doc = Document(text=block.text, blocks=[block],
+                       source=Source(kind="text", origin="x", title="书"),
+                       stats={})
+        r = FakeRunner([json.dumps(
+            {"title": "第一章", "summary": "摘要",
+             "prose": "长" * 3000, "quotes": []}, ensure_ascii=False)])
+        notes, report = run_narrate(doc, r, workers=1)
+        self.assertEqual(report["超长正文"], 1)
+        self.assertEqual(report["超长正文明细"][0]["chars"], 3000)
 
 
 class TestRunners(unittest.TestCase):

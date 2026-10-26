@@ -43,6 +43,8 @@ def normalize(s: str) -> str:
     不接上会让真实摘录匹配失败。
     """
     s = re.sub(r"-\s*\n\s*", "", s)
+    # 带时间戳的逐字稿：先把 [HH:MM:SS] 剥掉，否则引用跨一行就必然对不上
+    s = re.sub(r"\[\d{1,2}:\d{2}:\d{2}\]", "", s)
     s = re.sub(r"\s+", "", s)
     # markdown 排版符号：模型引用时会去掉 **加粗** / `代码` / 列表符号
     s = s.replace("*", "").replace("`", "").replace("_", "")
@@ -55,6 +57,9 @@ def normalize(s: str) -> str:
     for ch in "「」『』《》〈〉【】":
         s = s.replace(ch, "")
     s = s.replace("—", "-").replace("–", "-").replace("…", "...")
+    # 标点不算内容：自动字幕常常没有标点，模型引用时会自己补逗号/句号。
+    # 只保留文字、数字和汉字，避免「补标点」被误判成编造。
+    s = re.sub(r"[^\w\u4e00-\u9fff]+", "", s)
     return s
 
 
@@ -71,7 +76,10 @@ def anchor_hit(excerpt: str, block_text: str) -> bool:
         return False
     if ne in nb:
         return True
-    parts = [p for p in re.split(r"(?:\.\.\.|…)+", ne) if len(p) >= 8]
+    # 省略号要在归一化之前切：normalize 会把标点一起删掉
+    raw_parts = re.split(r"(?:\.\.\.|…)+", excerpt)
+    parts = [normalize(p) for p in raw_parts if p.strip()]
+    parts = [p for p in parts if len(p) >= 8]
     if len(parts) >= 2:
         pos = 0
         for p in parts:

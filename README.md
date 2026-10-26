@@ -120,6 +120,10 @@ cp .env.example .env
 python3 -m ed run "https://www.bilibili.com/video/BVxxxx" \
   --workdir runs/my-video --out 视频-蒸馏版.md --fast
 
+# 中文视频默认轨可能是英文机翻，指定原声语言
+python3 -m ed run "https://youtu.be/xxxx" --language zh \
+  --workdir runs/my-video --out 视频-蒸馏版.md --fast
+
 # 只想先拿逐字稿（调试或手动编排）
 python3 -m ed transcript "https://www.bilibili.com/video/BVxxxx" --out transcript.txt
 

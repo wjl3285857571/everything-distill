@@ -24,6 +24,10 @@ from .stage1 import anchor_hit
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))), "templates")
 
+# 和 templates/narrate_system.md 里的 1200–2500 字保持一致。
+# 只留痕、不拦截：超长不丢内容，但编排者要能看见。
+PROSE_MAX_CHARS = 2500
+
 
 def load_template(name: str) -> str:
     with open(os.path.join(TEMPLATE_DIR, name), encoding="utf-8") as f:
@@ -199,6 +203,8 @@ def run_narrate(doc: Document, runner: Runner, workers: int = 4,
     notes = [n for n in results if n is not None]
     failed = [n for n in notes if n.error]
     produced = sum(1 for n in notes if n.prose)
+    overs = [{"title": n.title, "chars": len(n.prose)}
+             for n in notes if len(n.prose) > PROSE_MAX_CHARS]
     report = {
         "部分数": len(notes),
         "成功": produced,
@@ -207,6 +213,8 @@ def run_narrate(doc: Document, runner: Runner, workers: int = 4,
         "作废引用": sum(n.dropped_quotes for n in notes),
         "外部引用": sum(len(n.external_refs) for n in notes),
         "总字数": sum(len(n.prose) for n in notes),
+        "超长正文": len(overs),
+        "超长正文明细": overs[:10],
         "通过": bool(notes) and not failed and produced == len(notes),
     }
     return notes, report

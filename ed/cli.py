@@ -603,7 +603,7 @@ def cmd_frames(args) -> int:
 
 
 def cmd_narrate(args) -> int:
-    from .distill.narrate import run_narrate
+    from .distill.narrate import run_narrate, PROSE_MAX_CHARS
     doc = workspace.load_document(args.workdir)
     runner = make_runner(args)
     print(f"讲述：{len(doc.blocks)} 块，按章节分组")
@@ -616,6 +616,11 @@ def cmd_narrate(args) -> int:
           f"{report['总字数']:,} 字")
     for f in report["失败明细"][:5]:
         print(f"  ✘ {f['title']}：{f['error']}")
+    if report.get("超长正文"):
+        print(f"  ⚠ {report['超长正文']} 部分超过 {PROSE_MAX_CHARS} 字"
+              "（只留痕，不拦截）：")
+        for o in report["超长正文明细"][:5]:
+            print(f"     {o['title']} — {o['chars']} 字")
     print(f"→ narrate.json 已写入 {args.workdir}")
     return 0 if report["通过"] else 2
 
@@ -721,6 +726,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("ingest", help="转换与切块")
     p.add_argument("input")
     p.add_argument("--workdir", required=True)
+    p.add_argument("--prefer", default="auto",
+                   choices=["auto", "subtitle", "audio"],
+                   help="视频取稿偏好：auto=先字幕后音频")
+    p.add_argument("--language", default=None,
+                   help="视频/播客语言（如 zh、en）；Supadata 用它选原声轨")
+    p.add_argument("--asr-engine", default="auto", choices=["auto", "local"])
+    p.add_argument("--asr-model", default="whisper-large-v3-turbo")
     p.set_defaults(func=cmd_ingest)
 
     p = sub.add_parser("stage1", help="第一段：内容蒸馏")
@@ -862,6 +874,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--max-chars", type=int, default=14000)
     p.add_argument("--fast", action="store_true",
                    help="长内容按章采样，一次调用出概述（快，细节少）")
+    p.add_argument("--prefer", default="auto",
+                   choices=["auto", "subtitle", "audio"],
+                   help="视频取稿偏好：auto=先字幕后音频")
+    p.add_argument("--language", default=None,
+                   help="视频/播客语言（如 zh、en）；Supadata 用它选原声轨")
+    p.add_argument("--asr-engine", default="auto", choices=["auto", "local"])
+    p.add_argument("--asr-model", default="whisper-large-v3-turbo")
     p.add_argument("--max-insights", type=int, default=200,
                    help="第一段最多保留多少条洞察（--deep 时用）")
     p.add_argument("--force-personal", action="store_true",

@@ -652,7 +652,7 @@ def to_transcript(url: str, prefer: str = "auto",
     if prefer in ("subtitle", "auto") and is_yt:
         # ① Supadata API（最优先：秒级、免下载、带时间戳；免费档 100 次/月）
         from .supadata import fetch_transcript_supadata
-        rs = fetch_transcript_supadata(url)
+        rs = fetch_transcript_supadata(url, lang=language)
         attempts.append({"步骤": "Supadata", "成功": rs.get("ok", False),
                          "细节": rs.get("reason") or rs.get("via", "")})
         if rs.get("ok"):

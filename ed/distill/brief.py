@@ -17,9 +17,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..ingest.base import Document
+from ..ingest.base import Block, Document
 from ..runner import Runner, parse_json_loose
-from .narrate import group_blocks, load_template
+from .narrate import load_template
 
 MIN_GIST_CHARS = 120
 SINGLE_PASS_LIMIT = 14_000
@@ -151,6 +151,67 @@ def _section(data: Dict[str, Any], blocks: List) -> BriefSection:
     return s
 
 
+def _split_text(text: str, max_chars: int) -> List[str]:
+    """把超长单块按行切开；单行本身超长就硬切。
+
+    逐字稿 ingest 后常常是「一整块 2–4 万字」，group_blocks 只按块边界
+    分组，会让整块挤进一次 section 调用，概述的信息在第一步就被压没。
+    """
+    if len(text) <= max_chars:
+        return [text]
+    chunks: List[str] = []
+    buf: List[str] = []
+    size = 0
+    for line in text.splitlines(keepends=True):
+        if buf and size + len(line) > max_chars:
+            chunks.append("".join(buf))
+            buf, size = [], 0
+        if len(line) > max_chars:
+            if buf:
+                chunks.append("".join(buf))
+                buf, size = [], 0
+            for i in range(0, len(line), max_chars):
+                chunks.append(line[i:i + max_chars])
+            continue
+        buf.append(line)
+        size += len(line)
+    if buf:
+        chunks.append("".join(buf))
+    return chunks
+
+
+def _brief_groups(doc: Document, max_chars: int,
+                  min_chars: int = 3000) -> List[List[Block]]:
+    """按章节分组，并且先切开超长单块。"""
+    groups: List[List[Block]] = []
+    cur: List[Block] = []
+    cur_chars = 0
+    cur_head: Optional[str] = None
+
+    for b in doc.blocks:
+        for chunk in _split_text(b.text or "", max_chars):
+            head = b.heading or "正文"
+            if cur and cur_chars + len(chunk) > max_chars:
+                groups.append(cur)
+                cur, cur_chars, cur_head = [], 0, None
+            if (cur and cur_head is not None and head != cur_head
+                    and cur_chars >= min_chars):
+                groups.append(cur)
+                cur, cur_chars, cur_head = [], 0, None
+            cur.append(Block(index=b.index, text=chunk,
+                             heading=b.heading, level=b.level))
+            cur_chars += len(chunk)
+            if cur_head is None:
+                cur_head = head
+            if cur_chars >= max_chars:
+                groups.append(cur)
+                cur, cur_chars, cur_head = [], 0, None
+
+    if cur:
+        groups.append(cur)
+    return groups
+
+
 def run_brief(doc: Document, runner: Runner, max_chars: int = SINGLE_PASS_LIMIT,
               workers: int = 2, progress=None,
               fast: bool = False) -> Tuple[Brief, Dict[str, Any]]:
@@ -181,7 +242,7 @@ def run_brief(doc: Document, runner: Runner, max_chars: int = SINGLE_PASS_LIMIT,
                     title=str(item.get("title") or "正文").strip(),
                     gist=_clean(item.get("gist"))))
     else:
-        groups = group_blocks(doc, min_chars=3000, max_chars=max_chars)
+        groups = _brief_groups(doc, max_chars=max_chars)
         results: List[Optional[BriefSection]] = [None] * len(groups)
         lock = threading.Lock()
         done = [0]
