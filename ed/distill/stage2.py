@@ -10,6 +10,7 @@
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from ..context.profile import Context
@@ -122,11 +123,20 @@ def _basis_haystack(kind: str, ctx, doc) -> str:
     return doc.text if doc else ""
 
 
-def quote_in_source(quote: str, source: str) -> bool:
-    """引文是否真的出现在来源里（归一化后整段包含）。
+def _shingles(s: str, n: int = 8) -> set:
+    if len(s) <= n:
+        return {s} if s else set()
+    return {s[i:i + n] for i in range(len(s) - n + 1)}
 
-    只做整段包含，不做「任意 12 字窗口」——那会让编造的引文靠一个
-    常见短语混过去。模型偶尔在句尾补省略号，去掉后再比一次。
+
+def quote_in_source(quote: str, source: str, min_coverage: float = 0.8) -> bool:
+    """引文是否真的来自来源。
+
+    规则：
+      - 归一化后整段出现 → 通过（最理想）
+      - 模型常做的两件事要容忍：去掉 markdown 加粗、截断括号里的补充。
+        所以退一步看「8 字片段覆盖率」：至少 80% 的片段在来源里出现。
+      - 覆盖率不够就当编的。
     """
     from .stage1 import normalize
     q = normalize(quote)
@@ -135,12 +145,96 @@ def quote_in_source(quote: str, source: str) -> bool:
         return False
     if q in s:
         return True
-    for tail in ("...", "…"):
-        if q.endswith(tail):
-            q2 = q[:-len(tail)]
-            if q2 and q2 in s:
-                return True
-    return False
+    if len(q) < 16:
+        return False
+    grams = _shingles(q)
+    if not grams:
+        return False
+    hit = sum(1 for g in grams if g in s)
+    return (hit / len(grams)) >= min_coverage
+
+
+def _coverage(grams: set, text: str) -> float:
+    if not grams:
+        return 0.0
+    return sum(1 for g in grams if g in text) / len(grams)
+
+
+def _sentences(text: str) -> List[str]:
+    return [p.strip() for p in re.split(r"[。！？\n]+", text) if len(p.strip()) >= 8]
+
+
+def snap_basis_to_sources(stage2: Stage2, ctx=None, doc=None) -> List[Basis]:
+    """把模型写的依据引文替换成来源里的真实句子。
+
+    模型常把记忆压缩成一句话（去掉加粗、括号、改标点），直接当引文
+    是不诚实的。这里按 8 字片段覆盖率找最接近的原句，替换掉；
+    找不到足够接近的就判定这条依据无效，并连带删掉引用它的关联。
+    """
+    from .stage1 import normalize
+
+    pools: Dict[str, List[tuple]] = {}
+    wholes: Dict[str, str] = {}
+    if ctx is not None:
+        pools["memory"] = [(name, s)
+                           for name, text in ctx.memories.items()
+                           for s in _sentences(text)]
+        wholes["memory"] = "\n".join(ctx.memories.values())
+        pools["mention"] = [("会话", str(s.get("quote", "")))
+                            for s in ctx.sessions
+                            if str(s.get("quote", "")).strip()]
+        wholes["mention"] = "\n".join(str(s.get("quote", ""))
+                                      for s in ctx.sessions)
+    if doc is not None:
+        pools["content"] = [("原文", s) for s in _sentences(doc.text)]
+        wholes["content"] = doc.text
+
+    bad: List[Basis] = []
+    for b in stage2.basis:
+        pool = pools.get(b.kind) or []
+        if not pool:
+            bad.append(b)
+            continue
+        grams = _shingles(normalize(b.quote))
+        if not grams:
+            bad.append(b)
+            continue
+
+        # 先看整篇：跨句引用（两句拼在一起）在单句里找不到，
+        # 但它确实来自原文，不该误杀。
+        if _coverage(grams, normalize(wholes.get(b.kind, ""))) >= 0.8:
+            if b.kind == "memory" and ctx is not None:
+                # 模型可能把来源标错（比如标成没传进去的 MEMORY.md），
+                # 这里按实际命中的文件纠正。
+                best_file, best_file_cov = "", 0.0
+                for name, text in ctx.memories.items():
+                    cov = _coverage(grams, normalize(text))
+                    if cov > best_file_cov:
+                        best_file, best_file_cov = name, cov
+                if best_file_cov >= 0.8:
+                    b.source = best_file
+            continue
+
+        best_src, best_text, best_cov = "", "", 0.0
+        for src, text in pool:
+            cov = _coverage(grams, normalize(text))
+            if cov > best_cov:
+                best_src, best_text, best_cov = src, text, cov
+        if best_cov >= 0.5:
+            b.quote = best_text
+            if b.kind == "memory":
+                b.source = best_src
+        else:
+            bad.append(b)
+
+    if bad:
+        bad_ids = {b.id for b in bad}
+        stage2.basis = [b for b in stage2.basis if b.id not in bad_ids]
+        stage2.relevant = [
+            r for r in stage2.relevant
+            if not (set(r.get("basis") or []) & bad_ids)
+        ]
+    return bad
 
 
 def verify_stage2(stage2: Stage2, ctx=None, stage1: Optional[Stage1] = None,

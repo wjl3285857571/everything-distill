@@ -19,7 +19,7 @@ sys.path.insert(0, ROOT)
 from ed.distill.stage1 import (  # noqa: E402
     anchor_hit, build_system_prompt, check_batch_receipts, normalize,
     run_stage1, verify_stage1)
-from ed.distill.stage2 import verify_stage2  # noqa: E402
+from ed.distill.stage2 import quote_in_source, verify_stage2  # noqa: E402
 from ed.ingest.base import (Block, Document, extract_main_text,  # noqa: E402
                             load_xhs, read_docx, read_transcript_json)
 from ed.ingest.supadata import build_request_url  # noqa: E402
@@ -66,6 +66,13 @@ class TestReceipts(unittest.TestCase):
         self.assertEqual(mismatches[0]["声称"], 0)
         self.assertEqual(mismatches[0]["实际"], 1)
 
+    def test_receipt_counting_with_counters_is_accepted(self):
+        """模型可能只数 insights，也可能把反例一起数，两种都该放行。"""
+        missing, mismatches = check_batch_receipts(
+            make_doc().blocks, "第 1 块：找到 2 条\n",
+            [self._ins()], [self._ins()])
+        self.assertEqual((missing, mismatches), ([], []))
+
     def test_accurate_receipt_passes(self):
         missing, mismatches = check_batch_receipts(
             make_doc().blocks, "第 1 块：找到 1 条\n", [self._ins()])
@@ -99,6 +106,81 @@ class TestStage1Failures(unittest.TestCase):
         v = verify_stage1(Stage1(source=doc.source), doc)
         self.assertFalse(v["通过"])
         self.assertTrue(v["空产出"])
+
+
+class TestPruneUnlocatable(unittest.TestCase):
+    def test_fabricated_entry_is_removed(self):
+        """对不上原文的条目要整条删掉，而不是留在结果里。"""
+        from ed.distill.stage1 import prune_unlocatable
+        from ed.schema import Stage1
+        doc = make_doc()
+        good = Insight(id="I1", claim="ok", support=TEXT,
+                       locator=Locator(block=1))
+        bad = Insight(id="I2", claim="bad", support="原文根本没有这句话",
+                      locator=Locator(block=1))
+        s1 = Stage1(source=doc.source, insights=[good, bad])
+        dropped = prune_unlocatable(s1, doc)
+        self.assertEqual([d.id for d in dropped], ["I2"])
+        self.assertEqual([i.id for i in s1.insights], ["I1"])
+
+
+class TestQuoteCoverage(unittest.TestCase):
+    def test_markdown_and_truncation_tolerated(self):
+        """去掉 ** 加粗、截掉括号补充，都算真实引用。"""
+        src = ("**求职期的项目策略**：倾向把现成工具拆开重写，作为简历项目"
+               "（原话「扒一扒」）。")
+        q = "求职期的项目策略：倾向把现成工具拆开重写，作为简历项目。"
+        self.assertTrue(quote_in_source(q, src))
+
+    def test_fabricated_quote_rejected(self):
+        self.assertFalse(quote_in_source(
+            "他养了三只猫并且每天早起跑步", "他喜欢读书和健身。"))
+
+    def test_short_quote_requires_exact_match(self):
+        self.assertFalse(quote_in_source("每天早起", "他喜欢读书和健身。"))
+
+
+class TestBasisSnap(unittest.TestCase):
+    def test_paraphrase_snapped_to_real_sentence(self):
+        from ed.distill.stage2 import snap_basis_to_sources
+        ctx = _Ctx(memories={"USER.md": (
+            "他喜欢读书。**求职期的项目策略**：倾向把现成工具拆开重写，"
+            "作为简历项目（原话「扒一扒」）。")})
+        s2 = Stage2(
+            relevant=[{"insight_id": "I1", "why": "x", "basis": [1]}],
+            basis=[Basis(id=1, kind="memory", source="USER.md",
+                         quote="求职期的项目策略：倾向把现成工具拆开重写，作为简历项目。")],
+        )
+        bad = snap_basis_to_sources(s2, ctx=ctx)
+        self.assertEqual(bad, [])
+        # 整篇覆盖率够高时保留原句（截断括号补充是可接受的）
+        self.assertIn("求职期的项目策略", s2.basis[0].quote)
+
+    def test_multi_sentence_quote_kept(self):
+        """跨句引用不该因为单句比对找不到就被误杀。"""
+        from ed.distill.stage2 import snap_basis_to_sources
+        ctx = _Ctx(memories={"USER.md": (
+            "希望掌控自己的生活。财富自由最吸引他的是免于生计约束。")})
+        s2 = Stage2(
+            relevant=[{"insight_id": "I1", "why": "x", "basis": [1]}],
+            basis=[Basis(id=1, kind="memory", source="USER.md",
+                         quote="希望掌控自己的生活。财富自由最吸引他的是免于生计约束。")],
+        )
+        bad = snap_basis_to_sources(s2, ctx=ctx)
+        self.assertEqual(bad, [])
+        self.assertIn("财富自由", s2.basis[0].quote)
+
+    def test_unmatchable_basis_removed_with_relevance(self):
+        from ed.distill.stage2 import snap_basis_to_sources
+        ctx = _Ctx(memories={"USER.md": "他喜欢读书和健身。"})
+        s2 = Stage2(
+            relevant=[{"insight_id": "I1", "why": "x", "basis": [1]}],
+            basis=[Basis(id=1, kind="memory", source="USER.md",
+                         quote="他养了三只猫")],
+        )
+        bad = snap_basis_to_sources(s2, ctx=ctx)
+        self.assertEqual(len(bad), 1)
+        self.assertEqual(s2.relevant, [])
 
 
 class TestStage2Provenance(unittest.TestCase):

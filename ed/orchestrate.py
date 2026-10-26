@@ -28,7 +28,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .distill.stage1 import (BATCH_SIZE, build_system_prompt,
                              check_batch_receipts, load_template,
-                             make_batches, render_blocks, _parse)
+                             make_batches, prune_unlocatable,
+                             render_blocks, _parse)
 from .ingest.base import Document
 from .schema import Basis, Insight, Locator, Stage1, Stage2
 
@@ -173,7 +174,7 @@ def collect(workdir: str, batch_size: int = BATCH_SIZE,
                 open_questions.append(q.strip())
 
         missing, mismatches = check_batch_receipts(
-            blocks, raw, batch_insights + batch_counters)
+            blocks, raw, batch_insights, batch_counters)
         if missing:
             status = "缺回执"
         elif mismatches:
@@ -210,6 +211,9 @@ def collect(workdir: str, batch_size: int = BATCH_SIZE,
     stage1.overview = overview
     stage1.structure = structure
 
+    total_before = len(stage1.insights) + len(stage1.counter_examples)
+    dropped = prune_unlocatable(stage1, doc)
+
     # 筛选：一本书可能出 500+ 条，全塞给第二段会爆上下文
     from .distill.select import select
     sel = select(stage1, max_total=max_insights)
@@ -224,17 +228,24 @@ def collect(workdir: str, batch_size: int = BATCH_SIZE,
         "失败批次数": sum(1 for r in receipts_log if r.get("状态") == "失败"),
     }
     v = verify_stage1(stage1, doc, partial)
-    produced = len(insights) + len(counters)
+    produced = len(stage1.insights) + len(stage1.counter_examples)
+    drop_ratio = (len(dropped) / total_before) if total_before else 0.0
     report = {
         "批数": len(batches),
         "回执": receipts_log,
         **{k: val for k, val in partial.items() if k != "回执"},
         "未完成批次数": len(unfinished),
         "产出洞察数": produced,
+        "作废条数": len(dropped),
+        "作废明细": [{"id": d.id, "标题": d.claim[:40],
+                      "原因": "摘录在原文定位不到"} for d in dropped[:10]],
+        "作废比例": round(drop_ratio, 3),
         "多余输出": _extra_outputs(d, len(batches)),
         "筛选": sel["报告"],
         "verify": v,
-        "通过": v["通过"] and not unfinished and (produced > 0 or not doc.blocks),
+        "通过": (v["通过"] and not unfinished
+                 and (produced > 0 or not doc.blocks)
+                 and drop_ratio <= 0.3),
     }
     workspace.save_stage1(workdir, stage1, report)
     return report
@@ -374,6 +385,9 @@ def collect2(workdir: str, out_path: Optional[str] = None) -> Dict[str, Any]:
         doc = workspace.load_document(workdir)
     except Exception:
         doc = None
-    v = verify_stage2(stage2, ctx=_default_context(), stage1=stage1, doc=doc)
+    from .distill.stage2 import snap_basis_to_sources
+    ctx = _default_context()
+    snapped = snap_basis_to_sources(stage2, ctx=ctx, doc=doc)
+    v = verify_stage2(stage2, ctx=ctx, stage1=stage1, doc=doc)
     return {"关联": len(stage2.relevant), "依据": len(stage2.basis),
-            "校验": v}
+            "作废依据": len(snapped), "校验": v}

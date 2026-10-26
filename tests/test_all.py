@@ -168,7 +168,7 @@ class TestStage1Verify(unittest.TestCase):
         self.assertFalse(v["通过"])
 
     def test_detects_misattribution(self):
-        """内容真实但归错块 —— 会污染最终产物的「出处」。"""
+        """内容真实但归错块 —— 会污染最终产物的「出处」，必须重算。"""
         text = "# 甲\n\n这是甲部分的原文内容。\n\n# 乙\n\n这是乙部分的另一段原文。"
         doc = make_doc(text)
         blocks = doc.blocks
@@ -177,8 +177,10 @@ class TestStage1Verify(unittest.TestCase):
                       support="这是乙部分的另一段原文。",
                       locator=Locator(block=blocks[0].index))
         v = verify_stage1(Stage1(source=doc.source, insights=[ins]), doc)
-        self.assertFalse(v["通过"])
         self.assertEqual(v["归属错误"], 1)
+        self.assertEqual(ins.locator.block, blocks[1].index)
+        # 已经按真实位置修正，属于已修复的告警，不阻断
+        self.assertTrue(v["通过"])
 
     def test_honest_passes(self):
         doc = make_doc("这是真实的原文内容，讲了一件事。")

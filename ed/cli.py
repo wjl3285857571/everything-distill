@@ -21,7 +21,7 @@ from typing import List, Optional
 from . import workspace
 from .context.profile import Context
 from .distill.stage1 import run_stage1, verify_stage1
-from .distill.stage2 import run_stage2, verify_stage2
+from .distill.stage2 import run_stage2, snap_basis_to_sources, verify_stage2
 from .ingest.base import load
 from .render.document import render
 from .runner import CommandRunner, FileRunner, HermesRunner, Runner, RunnerError
@@ -81,6 +81,7 @@ def cmd_stage1(args) -> int:
     print(f"第一段：{len(doc.blocks)} 块，批大小 {args.batch_size}，并发 {args.workers}")
     stage1, report = run_stage1(
         doc, runner, batch_size=args.batch_size, workers=args.workers,
+        max_insights=args.max_insights,
         progress=lambda m: print("  " + m, flush=True),
     )
     v = verify_stage1(stage1, doc, report)
@@ -91,8 +92,13 @@ def cmd_stage1(args) -> int:
     print(f"回执缺失 {report['缺失回执总数']} ｜ "
           f"数量不符 {report.get('数量不符总数', 0)} ｜ "
           f"失败批次 {report.get('失败批次数', 0)} ｜ "
+          f"作废 {report.get('作废条数', 0)} ｜ "
           f"摘录定位 {v['定位成功']}/{v['总数']} ｜ "
           f"归属错误 {v['归属错误']}")
+    if report.get("作废明细"):
+        print("  ✘ 摘录对不上原文，已整条作废：")
+        for m in report["作废明细"][:5]:
+            print(f"     {m['id']} {m['标题'][:36]}")
     if v["无法定位明细"]:
         print("  ✘ 无法定位：")
         for m in v["无法定位明细"][:5]:
@@ -115,10 +121,16 @@ def cmd_stage2(args) -> int:
     runner = make_runner(args)
     print(f"第二段：处境 {ctx.summary()}")
     stage2 = run_stage2(stage1, ctx, runner)
+    # 模型常把记忆压缩成一句「引文」；先回贴到来源里的真实句子，
+    # 贴不上的依据连它支撑的关联一起作废。
+    snapped = snap_basis_to_sources(stage2, ctx=ctx, doc=doc)
     v = verify_stage2(stage2, ctx=ctx, stage1=stage1, doc=doc)
     workspace.save_stage2(args.workdir, stage2)
     print(f"关联 {len(stage2.relevant)} ｜ 依据 {len(stage2.basis)} ｜ "
           f"下一步 {len(stage2.next_actions)}")
+    if snapped:
+        print(f"  依据作废：{len(snapped)} 条引文在来源里找不到，"
+              "连同它们支撑的关联一起删掉了")
     if not v["通过"]:
         print("  ✘ 校验没过：")
         if v["无依据的关联"]:
@@ -148,7 +160,11 @@ def _workdir_failures(workdir: str, mem_dir: str) -> List[str]:
         try:
             with open(rp, encoding="utf-8") as f:
                 r = json.load(f)
-            if not r.get("通过", True):
+            # 用当前校验逻辑重算，别信报告里可能过期的「通过」
+            stage1 = workspace.load_stage1(workdir)
+            doc = workspace.load_document(workdir)
+            v1 = verify_stage1(stage1, doc, r)
+            if not v1["通过"]:
                 out.append(
                     f"第一段：{r.get('未完成批次数', 0)} 批未完成，"
                     f"{r.get('缺失回执总数', 0)} 个块缺回执，"
@@ -453,6 +469,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("stage1", help="第一段：内容蒸馏")
     p.add_argument("--workdir", required=True)
+    p.add_argument("--max-insights", type=int, default=200,
+                   help="保留多少条洞察（超出按块轮转裁剪，默认 200）")
     common(p)
     p.set_defaults(func=cmd_stage1)
 

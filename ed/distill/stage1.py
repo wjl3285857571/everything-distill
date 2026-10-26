@@ -44,6 +44,9 @@ def normalize(s: str) -> str:
     """
     s = re.sub(r"-\s*\n\s*", "", s)
     s = re.sub(r"\s+", "", s)
+    # markdown 排版符号：模型引用时会去掉 **加粗** / `代码` / 列表符号
+    s = s.replace("*", "").replace("`", "").replace("_", "")
+    s = s.lstrip("-•·")
     s = s.replace("“", '"').replace("”", '"')
     s = s.replace("‘", "'").replace("’", "'")
     s = s.replace("，", ",").replace("。", ".").replace("；", ";")
@@ -98,31 +101,47 @@ def claimed_count(receipt: str) -> Optional[int]:
     return None
 
 
-def check_batch_receipts(blocks, raw: str, items
+def check_batch_receipts(blocks, raw: str, insights, counters=None
                          ) -> Tuple[List[int], List[Dict[str, Any]]]:
     """核对一批的回执：缺哪些块、哪些块的条数对不上。
 
     回执是模型的自述，必须和程序实际解析到的条目数对照。
     以前只检查「有没有这一块」，所以回执写「0 条」但实际有 5 条也能过。
+
+    口径上留一点余地：模型可能只数 `insights`，也可能把 `counter_examples`
+    一起数。两种都接受——真正要挡的是「写 0 条、实际一大堆」。
     """
+    counters = counters or []
     receipts = parse_receipts(raw)
     missing = [b.index for b in blocks if b.index not in receipts]
-    actual: Dict[int, int] = {}
-    for ins in items:
+
+    ins_count: Dict[int, int] = {}
+    all_count: Dict[int, int] = {}
+    for ins in insights:
         b = ins.locator.block
         if b:
-            actual[b] = actual.get(b, 0) + 1
+            ins_count[b] = ins_count.get(b, 0) + 1
+            all_count[b] = all_count.get(b, 0) + 1
+    for ins in counters:
+        b = ins.locator.block
+        if b:
+            all_count[b] = all_count.get(b, 0) + 1
+
     mismatches: List[Dict[str, Any]] = []
     for b in blocks:
         if b.index not in receipts:
             continue
         claimed = claimed_count(receipts[b.index])
-        real = actual.get(b.index, 0)
+        only_ins = ins_count.get(b.index, 0)
+        with_counters = all_count.get(b.index, 0)
         if claimed is None:
-            mismatches.append({"块": b.index, "声称": None, "实际": real,
-                               "原因": "回执里没写条数"})
-        elif claimed != real:
-            mismatches.append({"块": b.index, "声称": claimed, "实际": real})
+            mismatches.append({"块": b.index, "声称": None,
+                               "实际": with_counters, "原因": "回执里没写条数"})
+            continue
+        if claimed != only_ins and claimed != with_counters:
+            mismatches.append({"块": b.index, "声称": claimed,
+                               "实际": with_counters,
+                               "实际(不含反例)": only_ins})
     return missing, mismatches
 
 
@@ -176,6 +195,7 @@ def run_stage1(
     id_start: int = 1,
     progress=None,
     workers: int = 4,
+    max_insights: int = 200,
 ) -> Tuple[Stage1, Dict[str, Any]]:
     """跑完第一段。返回 (Stage1, 报告)。
 
@@ -258,7 +278,7 @@ def run_stage1(
                 open_questions.append(q.strip())
 
         missing, mismatches = check_batch_receipts(
-            blocks, res["raw"], batch_insights + batch_counters)
+            blocks, res["raw"], batch_insights, batch_counters)
         if missing:
             status = "缺回执"
         elif mismatches:
@@ -274,8 +294,26 @@ def run_stage1(
             "条目数": len(batch_insights) + len(batch_counters),
         })
 
+    stage1 = Stage1(
+        source=doc.source,
+        insights=insights,
+        glossary=glossary,
+        counter_examples=counters,
+        open_questions=open_questions,
+        stats={},
+    )
+    total_before = len(stage1.insights) + len(stage1.counter_examples)
+    dropped = prune_unlocatable(stage1, doc)
+
+    # 和编排模式保持一致：超过上限就按块轮转裁剪，别让 stage1 直跑
+    # 把几百条全塞进文档。
+    from .select import select
+    sel = select(stage1, max_total=max_insights)
+    stage1.insights = sel["insights"]
+    produced = len(stage1.insights) + len(stage1.counter_examples)
+    drop_ratio = (len(dropped) / total_before) if total_before else 0.0
+
     unfinished = [r for r in receipts_log if r.get("状态") != "完整"]
-    produced = len(insights) + len(counters)
     report = {
         "批数": len(batches),
         "回执": receipts_log,
@@ -284,24 +322,25 @@ def run_stage1(
         "失败批次数": sum(1 for r in receipts_log if r.get("状态") == "失败"),
         "未完成批次数": len(unfinished),
         "产出洞察数": produced,
+        "作废条数": len(dropped),
+        "作废明细": [{"id": d.id, "标题": d.claim[:40],
+                      "原因": "摘录在原文定位不到"} for d in dropped[:10]],
+        "作废比例": round(drop_ratio, 3),
+        "筛选": sel["报告"],
         # 批次没跑完 / 回执对不上 / 一条洞察都没产出，都不算通过。
-        # 以前这里只看摘录定位，模型整批失败时 0 条 0 错，反而显示「通过」。
-        "通过": (not unfinished) and (produced > 0 or not doc.blocks),
+        # 作废比例过高说明模型在成段转述而不是引用，也不放心交出去。
+        "通过": ((not unfinished)
+                 and (produced > 0 or not doc.blocks)
+                 and drop_ratio <= 0.3),
     }
-    stage1 = Stage1(
-        source=doc.source,
-        insights=insights,
-        glossary=glossary,
-        counter_examples=counters,
-        open_questions=open_questions,
-        stats={
-            "有效字数": doc.stats.get("有效字数"),
-            "块数": len(doc.blocks),
-            "洞察数": len(insights),
-            "反例数": len(counters),
-            "术语数": len(glossary),
-        },
-    )
+    stage1.stats = {
+        "有效字数": doc.stats.get("有效字数"),
+        "块数": len(doc.blocks),
+        "洞察数": len(stage1.insights),
+        "反例数": len(stage1.counter_examples),
+        "术语数": len(glossary),
+        "作废数": len(dropped),
+    }
     return stage1, report
 
 
@@ -336,6 +375,35 @@ def _int_or_none(v) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def prune_unlocatable(stage1: Stage1, doc: Document) -> List[Insight]:
+    """把摘录在全文都定位不到的条目整条删掉。
+
+    README 的承诺是「对不上整条作废」；以前只是把它记成校验失败，
+    条目还留在 stage1.json 里，最后照样进文档。
+    """
+    def locatable(ins: Insight) -> bool:
+        if not ins.support:
+            return False
+        blk = ins.locator.block
+        if blk and 1 <= blk <= len(doc.blocks):
+            if anchor_hit(ins.support, doc.block_text(blk)):
+                return True
+        return any(anchor_hit(ins.support, b.text) for b in doc.blocks)
+
+    dropped: List[Insight] = []
+
+    kept: List[Insight] = []
+    for ins in stage1.insights:
+        (kept if locatable(ins) else dropped).append(ins)
+    stage1.insights = kept
+
+    kept_c: List[Insight] = []
+    for c in stage1.counter_examples:
+        (kept_c if locatable(c) else dropped).append(c)
+    stage1.counter_examples = kept_c
+    return dropped
 
 
 # ---------------------------------------------------------------- 校验
@@ -420,6 +488,7 @@ def verify_stage1(stage1: Stage1, doc: Document,
         "无数值结果": no_number,
         "批次": batch_info,
         "空产出": empty_output,
-        "通过": (not missing_support and not misattributed
-                 and batch_ok and not empty_output),
+        # 归属错误已经在上面按原文真实位置修正过，属于「已修复的告警」，
+        # 不应该让整轮失败；真正致命的是摘录根本定位不到。
+        "通过": not missing_support and batch_ok and not empty_output,
     }

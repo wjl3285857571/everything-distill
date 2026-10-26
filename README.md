@@ -39,10 +39,10 @@
 
 | 校验 | 机制 |
 |---|---|
-| 摘录真实性 | 每条洞察必须附原文逐字摘录，程序回原文做整段归一化比对（不再用短窗口模糊放行），对不上整条作废 |
-| 归属正确性 | 摘录定位不到声明的块时，按摘录在原文中的真实位置重算 |
-| 回执一致性 | 每块的回执条数必须等于实际解析到的条目数；缺回执、数量不符、批次失败都算未完成 |
-| 关联挂依据 | 「跟你有关」的每条都挂依据编号，且引文要回记忆文件 / 会话 / 原文核对，对不上不通过 |
+| 摘录真实性 | 每条洞察必须附原文逐字摘录，程序回原文做整段归一化比对；对不上整条作废，作废超过 30% 判失败 |
+| 归属正确性 | 摘录定位不到声明的块时，按摘录在原文中的真实位置重算并记录（不阻断） |
+| 回执一致性 | 每块的回执条数必须等于实际条目数（只数 insights，或 insights+反例，两种口径都接受）；缺回执、数量不符、批次失败都算未完成 |
+| 关联挂依据 | 「跟你有关」的每条都挂依据编号，引文会回贴到记忆 / 会话 / 原文里的真实句子；贴不上的依据连同它支撑的关联一起作废 |
 | 失败不交付 | 校验没过时默认不生成文档；要强行生成得显式 `--allow-failed`，文档顶部会带警告 |
 | 时间戳可回溯 | 字幕、ASR、JSON 逐字稿统一成 `[HH:MM:SS]`，每条观点可跳回原视频对应时刻 |
 
@@ -203,7 +203,7 @@ ed/
   verify/
     skill_meta.py      产物元信息校验
 templates/             第一段/第二段的 prompt 模板
-tests/                 108 项回归测试
+tests/                 116 项回归测试
 ```
 
 ## 实测性能（Apple M5）
@@ -353,10 +353,10 @@ Every claim the model makes is programmatically verified:
 
 | Check | Mechanism |
 |---|---|
-| Excerpt authenticity | Each insight must carry a verbatim quote from the source; normalized substring matching; failure rejects the whole insight |
-| Attribution correctness | If an excerpt isn't found in its claimed block, the true location is recomputed from the source text |
-| Receipt consistency | Each batch's declared count must equal the parsed count |
-| Grounded relevance | Every "relevant to you" item must cite a basis ID; ungrounded relevance = failure (an anti-sycophancy mechanism) |
+| Excerpt authenticity | Each insight must carry a verbatim quote; the whole normalized quote must match the source. Unmatched entries are dropped; dropping more than 30% fails the run |
+| Attribution correctness | If an excerpt isn't found in its claimed block, the true location is recomputed and recorded (non-blocking) |
+| Receipt consistency | Each block's declared count must equal the actual entry count (either insights only, or insights + counter-examples); missing receipts, mismatches, or failed batches count as unfinished |
+| Grounded relevance | Every "relevant to you" item cites a basis ID, and each quote is snapped to a real sentence in memory / session / source; bases that can't be snapped are dropped together with the items they support |
 | Timestamp grounding | Video transcripts are normalized to `[HH:MM:SS]`; every insight links back to the exact moment |
 
 ### 4. Free-tier first, always degradable
