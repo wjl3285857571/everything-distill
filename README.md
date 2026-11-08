@@ -79,6 +79,8 @@ python3 -m ed run 书.epub --runner openai --base-url https://api.deepseek.com/v
 | 播客 | 小宇宙 / 喜马拉雅 | 公开接口直取音频（付费内容诚实报付费墙） |
 | 社交帖 | X/Twitter | fxtwitter 公共镜像 API（免登录） |
 | 社交帖 | 微博 | 官方游客 cookie 自动领取 + 移动端 JSON 接口 |
+| 论坛帖 | V2EX | 官方公开 API 取主题 + 全部回复（免登录） |
+| 论坛帖 | Reddit | 官方 `.json` 优先（带完整评论树），国内被封时自动切 redlib 镜像 |
 | 论文 | arXiv（链接或 ID） | 官方 HTML 全文 + 导出 API 元数据，保留章节层级、公式与表格 |
 | 网页 | 任意博客/文章 | HTML 抓取 + 正文区域提取（按文本密度打分，去导航/页脚/侧栏） |
 | 本地文件 | epub / pdf / docx / txt / md / srt / vtt / mp3 / mp4 / wav / webm | 直接解析 |
@@ -257,7 +259,7 @@ ed/
   runner.py            模型调用抽象（宿主注入）
   orchestrate.py       编排（批次生成 / 结果校验合并）
   ingest/
-    base.py            epub/pdf/docx/html/txt 解析 + 网页/X/微博适配器
+    base.py            epub/pdf/docx/html/txt 解析 + 网页/X/微博/V2EX/Reddit 适配器
     video.py           视频链接 → 逐字稿（平台识别 + 多层降级链）
     cn_platforms.py    抖音 / 小红书 专属解析器
     podcast.py         小宇宙 / 喜马拉雅
@@ -387,6 +389,8 @@ PDF 抽出的文本没有标题标记，所以会先认章节行（`Introduction
 - `--fast` 的概述来自按章采样，细节可能缺失；它不是逐章讲透的替代品
 - 抖音/小红书解析依赖页面结构，平台改版需跟进（历史上都跟上了）
 - 微博批量抓取会触发风控，单条链接使用稳定
+- Reddit 从国内网络访问：官方 `.json` 常整段 403，RSS 会 429，实际主力是 redlib 公共镜像；镜像会被反爬（Anubis 浏览器校验）或下线，程序会按顺序换，全挂时报出每一条路的原因
+- V2EX 走官方公开 API；抓到的是主题页一次性返回的回复，上百楼的长帖可能不全
 - 喜马拉雅付费内容不提供音频（版权墙，诚实报错而非假装失败）
 - 第一段能保证「每块都被读过」，不保证「每个重要洞察都被记下」
 - 蒸馏质量取决于所用模型——本项目只保证**结构可信**（摘录可定位、关联有依据），不保证观点正确

@@ -5,7 +5,7 @@ description: 把书/论文/网页/视频蒸馏成蒸馏版或洞察版。Use whe
 
 # everything-distill · 万物皆可蒸
 
-把任意输入（书 / 论文 / 网页 / 视频 / 播客 / 帖文 / 本地音视频）蒸馏成一份
+把任意输入（书 / 论文 / 网页 / 视频 / 播客 / 帖文 / 论坛帖 / 本地音视频）蒸馏成一份
 **给人读的蒸馏版**，或者一份**给 AI 用的洞察版**。
 
 这是一个独立 CLI，不绑定 Hermes：任何能跑 shell 的 agent 都能用；
@@ -22,6 +22,7 @@ description: 把书/论文/网页/视频蒸馏成蒸馏版或洞察版。Use whe
 - Python 3.9+（只用标准库）
 - 可选：`ffmpeg` / `yt-dlp`（视频）、`mutool`（PDF，`brew install mupdf-tools`）
 - 不需要本地模型，不要求任何平台登录
+- Reddit 靠 redlib 公共镜像兜底（官方接口在国内常被封）；V2EX 走官方公开 API，两者都免登录
 
 ## 安装
 

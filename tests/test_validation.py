@@ -948,3 +948,146 @@ class TestRunnerFactory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestSocialPlatforms(unittest.TestCase):
+    """V2EX / Reddit 输入链路。
+
+    两者都免登录，但各有真实坑：
+      - V2EX 正文带 \\r，回复接口挂了不能把整篇带崩
+      - Reddit 官方接口在国内网络整段 403，必须靠镜像兜底；
+        镜像导航栏弹窗也是个 <h1>，取第一个 h1 会拿到「You are about to leave Redlib」
+    """
+
+    def test_load_url_routes_v2ex(self):
+        from ed.ingest.base import load_url
+        with patch("ed.ingest.base.load_v2ex", return_value="DOC") as m:
+            self.assertEqual(load_url("https://www.v2ex.com/t/1255299"), "DOC")
+        m.assert_called_once()
+
+    def test_load_url_routes_reddit_both_url_forms(self):
+        from ed.ingest.base import load_url
+        for u in ("https://www.reddit.com/r/books/comments/abc123/",
+                  "https://redd.it/abc123"):
+            with patch("ed.ingest.base.load_reddit", return_value="DOC") as m:
+                self.assertEqual(load_url(u), "DOC")
+            m.assert_called_once()
+
+    def test_v2ex_document_has_body_and_replies(self):
+        from ed.ingest.base import load_v2ex
+        topic = [{"title": "标题", "content": "正文\r\n第二行",
+                  "member": {"username": "u1"}, "node": {"title": "macOS"}, "created": 1}]
+        replies = [{"content": "回一句", "member": {"username": "u2"}}]
+
+        def fake(url, timeout=25, as_json=False):
+            return replies if "replies" in url else topic
+
+        with patch("ed.ingest.base._http_get", side_effect=fake):
+            doc = load_v2ex("https://www.v2ex.com/t/1")
+        self.assertEqual(doc.source.kind, "v2ex")
+        self.assertIn("正文", doc.text)
+        self.assertIn("**u2**：回一句", doc.text)
+        self.assertNotIn("\r", doc.text)
+        self.assertEqual(doc.source.meta["reply_count"], 1)
+        self.assertTrue(doc.blocks)
+
+    def test_v2ex_reply_failure_keeps_body(self):
+        """回复接口挂掉不能把整篇带崩——正文还在就还能蒸。"""
+        from ed.ingest.base import load_v2ex
+
+        def fake(url, timeout=25, as_json=False):
+            if "replies" in url:
+                raise ValueError("回复接口挂了")
+            return [{"title": "T", "content": "正文", "member": {"username": "u1"}}]
+
+        with patch("ed.ingest.base._http_get", side_effect=fake):
+            doc = load_v2ex("https://www.v2ex.com/t/1")
+        self.assertIn("正文", doc.text)
+        self.assertEqual(doc.source.meta["reply_count"], 0)
+
+    def test_v2ex_missing_topic_raises(self):
+        from ed.ingest.base import load_v2ex
+        with patch("ed.ingest.base._http_get", return_value=[]):
+            with self.assertRaises(ValueError):
+                load_v2ex("https://www.v2ex.com/t/1")
+
+    def test_reddit_json_backend_walks_nested_comments(self):
+        from ed.ingest.base import _reddit_from_json
+        payload = [
+            {"data": {"children": [{"data": {"title": "标题", "author": "op",
+                                             "selftext": "正文", "score": 9,
+                                             "subreddit": "books"}}]}},
+            {"data": {"children": [
+                {"kind": "t1", "data": {"author": "a1", "body": "评论一", "replies": {
+                    "data": {"children": [
+                        {"kind": "t1", "data": {"author": "a2", "body": "嵌套回复"}}]}}}},
+                {"kind": "more", "data": {}},
+            ]}},
+        ]
+        with patch("ed.ingest.base._http_get", return_value=payload):
+            doc = _reddit_from_json("u", "abc123")
+        self.assertIn("评论一", doc.text)
+        self.assertIn("嵌套回复", doc.text)      # 嵌套回复不能丢
+        self.assertEqual(doc.source.meta["backend"], "reddit-json")
+        self.assertEqual(doc.source.meta["comment_count"], 2)
+
+    def test_reddit_redlib_title_ignores_nav_popup(self):
+        """redlib 导航栏弹窗也是 h1：取第一个 h1 会拿到跳转提示。"""
+        from ed.ingest.base import _reddit_from_redlib
+        html = (
+            '<div class="popup"><h1>You are about to leave Redlib</h1></div>'
+            '<p class="post_header"><a class="post_author " href="/user/op">u/op</a>'
+            '<a class="post_subreddit" href="/r/books">r/books</a></p>'
+            '<h1 class="post_title">真标题</h1>'
+            '<div class="post_body"><div class="md"><p>镜像正文</p></div></div>'
+            '<div class="thread"><div id="c1" class="comment">'
+            '<div class="comment_body "><div class="md"><p>第一条评论</p></div></div>'
+            '</div></div>'
+        )
+        with patch("ed.ingest.base._http_get", return_value=html):
+            doc = _reddit_from_redlib("u", "abc123", "https://mirror.example")
+        self.assertEqual(doc.source.title, "真标题")
+        self.assertEqual(doc.source.author, "op")
+        self.assertIn("镜像正文", doc.text)
+        self.assertIn("第一条评论", doc.text)
+        self.assertEqual(doc.source.meta["subreddit"], "books")
+
+    def test_reddit_falls_back_to_redlib_when_official_blocked(self):
+        from ed.ingest.base import load_reddit
+        html = ('<h1 class="post_title">镜</h1><div class="post_body">'
+                '<div class="md"><p>镜像正文</p></div></div>')
+
+        def fake(url, timeout=25, as_json=False):
+            if "reddit.com" in url:
+                raise ValueError("拒绝访问（HTTP 403）")
+            return html
+
+        with patch("ed.ingest.base._http_get", side_effect=fake):
+            doc = load_reddit("https://www.reddit.com/r/books/comments/abc123/")
+        self.assertIn("镜像正文", doc.text)
+        self.assertTrue(doc.source.meta["backend"].startswith("https://"))
+
+    def test_reddit_error_names_every_backend(self):
+        """全挂时必须把每条路的原因都写出来，不能只说「失败」。"""
+        from ed.ingest.base import load_reddit
+        with patch("ed.ingest.base._http_get", side_effect=ValueError("拒绝访问（HTTP 403）")):
+            with self.assertRaises(ValueError) as ctx:
+                load_reddit("https://www.reddit.com/r/books/comments/abc123/")
+        msg = str(ctx.exception)
+        self.assertIn("官方接口", msg)
+        self.assertIn("safereddit", msg)
+
+    def test_redlib_anubis_challenge_is_reported_not_silent(self):
+        from ed.ingest.base import _reddit_from_redlib
+        page = "<html><title>Verifying your browser…</title></html>"
+        with patch("ed.ingest.base._http_get", return_value=page):
+            with self.assertRaises(ValueError) as ctx:
+                _reddit_from_redlib("u", "id", "https://mirror.example")
+        self.assertIn("Anubis", str(ctx.exception))
+
+    def test_balanced_div_stops_at_own_close_tag(self):
+        """评论里嵌 div 时不能一路吃到页面底部。"""
+        from ed.ingest.base import _balanced_div
+        raw = '<div class="a"><div class="b">X</div>Y</div>Z'
+        start = raw.index("<div")
+        self.assertEqual(_balanced_div(raw, start), '<div class="b">X</div>Y')

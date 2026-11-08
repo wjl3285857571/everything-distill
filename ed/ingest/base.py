@@ -1069,6 +1069,295 @@ def load_xhs(url: str) -> Document:
     return Document(text=text, blocks=blocks, source=src, stats=stats)
 
 
+# ---------------------------------------------------------------- V2EX / Reddit
+
+#: redlib 公共镜像。官方接口封 IP 时用它们兜底；实例会轮换，坏了就换一个。
+REDLIB_INSTANCES = (
+    "https://safereddit.com",
+    "https://redlib.catsarch.com",
+    "https://redlib.perennialte.ch",
+)
+
+_V2EX_RE = re.compile(r"v2ex\.com/t/(\d+)")
+_REDDIT_RE = re.compile(r"(?:reddit\.com/r/[^/]+/comments/|redd\.it/)([A-Za-z0-9]{4,10})")
+
+
+def _http_get(url: str, timeout: int = 25, as_json: bool = False):
+    """用 curl 取一个 URL。失败一律转成带人话原因的 ValueError。
+
+    这里**故意不用 urllib、也不加 -A**：V2EX 的 Cloudflare 和 redlib 的
+    Anubis 都拦"像浏览器"的 UA，反而放行 curl 自己的默认 UA。
+    实测加 Chrome UA 必 403/挑战页，不加就 200。
+
+    平台拒绝和网络不通分开报：前者换镜像可能还有救，后者换哪儿都白搭。
+    """
+    import subprocess
+
+    host = url.split("//", 1)[-1].split("/")[0]
+    try:
+        r = subprocess.run(
+            ["curl", "-sS", "--max-time", str(timeout), "-w", "\n%{http_code}", url],
+            capture_output=True, text=True, timeout=timeout + 15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"连不上 {host}：{exc}") from None
+    if r.returncode != 0:
+        detail = (r.stderr or "").strip().splitlines()
+        raise ValueError(f"连不上 {host}：{(detail[-1] if detail else 'curl 失败')[:160]}")
+
+    raw, _, code = r.stdout.rpartition("\n")
+    code = code.strip()
+    if code == "429":
+        raise ValueError(f"{host} 限流（429），过几分钟再试")
+    if code in ("401", "403"):
+        raise ValueError(f"{host} 拒绝访问（HTTP {code}）")
+    if code == "404":
+        raise ValueError(f"{host} 说这条内容不存在（404）")
+    if not code.startswith("2"):
+        raise ValueError(f"{host} 返回 HTTP {code or '未知'}")
+
+    if not as_json:
+        return raw
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError(f"{host} 没返回 JSON（多半被拦截了）") from None
+
+
+def is_v2ex(url: str) -> bool:
+    return bool(_V2EX_RE.search(url))
+
+
+def is_reddit(url: str) -> bool:
+    return bool(_REDDIT_RE.search(url))
+
+
+def load_v2ex(url: str) -> Document:
+    """V2EX 主题 + 回复 → Document。走官方公开 API，免登录。"""
+    m = _V2EX_RE.search(url)
+    if not m:
+        raise ValueError(f"这不是 V2EX 主题链接：{url}")
+    tid = m.group(1)
+
+    got = _http_get(f"https://www.v2ex.com/api/topics/show.json?id={tid}", as_json=True)
+    if not got:
+        raise ValueError(f"V2EX 上找不到主题 {tid}（可能已删除或 ID 不对）")
+    t = got[0] if isinstance(got, list) else got
+
+    body = (t.get("content") or "").strip()
+    if not body:
+        body = html_to_text(t.get("content_rendered") or "").strip()
+
+    parts = [body] if body else []
+    replies: List[Any] = []
+    try:
+        replies = _http_get(
+            f"https://www.v2ex.com/api/replies/show.json?topic_id={tid}",
+            as_json=True) or []
+    except ValueError:
+        # 回复拿不到不算失败：正文还在，蒸馏照样能跑。条数会记进 meta。
+        replies = []
+    if replies:
+        parts.append("## 回复")
+        for r in replies:
+            who = (r.get("member") or {}).get("username", "?")
+            txt = (r.get("content") or "").strip()
+            if not txt:
+                txt = html_to_text(r.get("content_rendered") or "").strip()
+            if txt:
+                parts.append(f"**{who}**：{txt}")
+
+    text = re.sub(r"\n{4,}", "\n\n\n", "\n\n".join(parts)).strip()
+    text = text.replace("\r\n", "\n").replace("\r", "\n")   # V2EX 正文带 \r
+    if not text:
+        raise ValueError(f"V2EX 主题 {tid} 抓不到正文（可能是纯水帖或接口变了）")
+
+    src = Source(
+        kind="v2ex",
+        origin=url,
+        title=(t.get("title") or f"V2EX {tid}")[:100],
+        author=(t.get("member") or {}).get("username", ""),
+        meta={
+            "node": (t.get("node") or {}).get("title", ""),
+            "reply_count": len(replies),
+            "created": t.get("created"),
+        },
+    )
+    blocks = build_blocks(text)
+    stats = effective_words(text)
+    stats["块数"] = len(blocks)
+    return Document(text=text, blocks=blocks, source=src, stats=stats)
+
+
+def _balanced_div(raw: str, start: int) -> str:
+    """从某个 <div 的起点扫到配对的 </div>，返回内部 HTML。
+
+    不能用正则直取：评论正文里可能嵌 div，一贪婪就吃掉半页。
+    """
+    i = raw.find(">", start) + 1
+    if start < 0 or i <= 0:
+        return ""
+    depth = 1
+    for m in re.finditer(r"<div\b|</div>", raw[i:]):
+        if m.group(0).startswith("</"):
+            depth -= 1
+            if depth == 0:
+                return raw[i:i + m.start()]
+        else:
+            depth += 1
+    return raw[i:]
+
+
+def _md_text(scope: str) -> str:
+    """取 scope 里第一个 class="md" 容器的纯文本（redlib 的正文容器）。"""
+    i = scope.find('class="md"')
+    if i < 0:
+        return ""
+    start = scope.rfind("<div", 0, i)
+    if start < 0:
+        return ""
+    return html_to_text(_balanced_div(scope, start)).strip()
+
+
+def _make_doc(*, text: str, url: str, title: str, author: str,
+              kind: str = "reddit", meta: Optional[Dict[str, Any]] = None) -> Document:
+    text = re.sub(r"\n{4,}", "\n\n\n", text).strip()
+    if not text:
+        raise ValueError("抓到的正文是空的")
+    src = Source(kind=kind, origin=url, title=(title or url)[:100],
+                 author=author, meta=meta or {})
+    blocks = build_blocks(text)
+    stats = effective_words(text)
+    stats["块数"] = len(blocks)
+    return Document(text=text, blocks=blocks, source=src, stats=stats)
+
+
+def _reddit_walk_comments(children: List[Any], depth: int = 0) -> List[str]:
+    """按原顺序展开评论树；'more' 节点跳过。"""
+    out: List[str] = []
+    for node in children:
+        if not isinstance(node, dict):
+            continue
+        if node.get("kind") != "t1":
+            continue
+        d = node.get("data") or {}
+        body = (d.get("body") or "").strip()
+        if body:
+            who = d.get("author", "?")
+            mark = "  " * min(depth, 3)
+            out.append(f"{mark}**{who}**：{body}")
+        replies = d.get("replies")
+        if isinstance(replies, dict):
+            out.extend(_reddit_walk_comments(
+                (replies.get("data") or {}).get("children") or [], depth + 1))
+    return out
+
+
+def _reddit_from_json(url: str, rid: str) -> Document:
+    """官方公开 .json：正文 + 评论树，结构最干净。"""
+    d = _http_get(
+        f"https://www.reddit.com/comments/{rid}.json?limit=200&sort=top",
+        as_json=True)
+    if not isinstance(d, list) or not d:
+        raise ValueError("返回结构不对（不是帖子 JSON）")
+    post = ((d[0].get("data") or {}).get("children") or [{}])[0].get("data") or {}
+    if not post:
+        raise ValueError("帖子里没有内容")
+    parts = [post.get("selftext") or ""]
+    cmts = _reddit_walk_comments(((d[1].get("data") or {}).get("children") or [])) if len(d) > 1 else []
+    if cmts:
+        parts.append("## 回复")
+        parts.extend(cmts)
+    return _make_doc(text="\n\n".join(p for p in parts if p), url=url,
+                     title=post.get("title", ""), author=post.get("author", ""),
+                     meta={"score": post.get("score"), "subreddit": post.get("subreddit"),
+                           "comment_count": len(cmts), "backend": "reddit-json"})
+
+
+def _reddit_from_redlib(url: str, rid: str, base: str) -> Document:
+    """redlib 镜像的 HTML：官方封 IP 时的兜底。
+
+    标记位置都是实测过的：
+      标题  h1.post_title（**不能取第一个 h1**，导航栏弹窗也是个 h1）
+      作者  a.post_author[href=/user/xxx]
+      正文  div.post_body > div.md
+      评论  div.comment（id+class 同标签）> div.comment_body > div.md
+    """
+    raw = _http_get(f"{base}/comments/{rid}")
+    if 'class="post_body"' not in raw:
+        if "Verifying your browser" in raw:
+            raise ValueError("镜像挂了浏览器校验（Anubis），换下一个")
+        if "You are about to leave Redlib" in raw:
+            raise ValueError("镜像只返回了跳转提示页")
+        raise ValueError("镜像没返回帖子正文")
+
+    tm = re.search(r'<h1[^>]*class="post_title"[^>]*>(.*?)</h1>', raw, re.S | re.I)
+    title = ""
+    if tm:
+        title = html_to_text(re.sub(r'<a[^>]*class="post_flair".*?</a>', "",
+                                    tm.group(1), flags=re.S | re.I)).strip()
+    if not title:
+        tm2 = re.search(r"<title[^>]*>(.*?)</title>", raw, re.S | re.I)
+        if tm2:
+            title = re.sub(r"\s+-\s+r/\w+$", "",
+                           re.sub(r"\s+", " ", html.unescape(tm2.group(1))).strip()).strip()
+
+    am = re.search(r'class="post_author[^"]*"\s+href="/user/([^"]+)"', raw)
+    author = am.group(1) if am else ""
+    sm = re.search(r'class="post_subreddit[^"]*"\s+href="/r/([^"]+)"', raw)
+
+    parts: List[str] = []
+    pb = raw.find('class="post_body"')
+    if pb >= 0:
+        parts.append(_md_text(_balanced_div(raw, raw.rfind("<div", 0, pb))))
+
+    cmts: List[str] = []
+    for m in re.finditer(r'class="comment"', raw):
+        start = raw.rfind("<div", 0, m.start())
+        if start < 0:
+            continue
+        scope = _balanced_div(raw, start)
+        body = _md_text(scope)          # 第一个 md 就是这条评论自己的正文
+        if not body:
+            continue
+        um = re.search(r'href="/user/([^"]+)"', scope)
+        cmts.append(f"**{um.group(1) if um else '?'}**：{body}")
+    if cmts:
+        parts.append("## 回复")
+        parts.extend(cmts)
+
+    return _make_doc(text="\n\n".join(p for p in parts if p), url=url, title=title,
+                     author=author,
+                     meta={"comment_count": len(cmts),
+                           "subreddit": sm.group(1) if sm else "",
+                           "backend": base})
+
+
+def load_reddit(url: str) -> Document:
+    """Reddit 单帖 → Document。
+
+    官方公开 .json 在国内网络常被整段封（403），所以按顺序兜底：
+    官方 JSON → redlib 镜像。两条都不通才报错，并把每条失败原因列出来。
+    """
+    m = _REDDIT_RE.search(url)
+    if not m:
+        raise ValueError(f"这不是 Reddit 帖子链接：{url}")
+    rid = m.group(1)
+
+    reasons: List[str] = []
+    try:
+        return _reddit_from_json(url, rid)
+    except ValueError as exc:
+        reasons.append(f"官方接口：{exc}")
+
+    for base in REDLIB_INSTANCES:
+        try:
+            return _reddit_from_redlib(url, rid, base)
+        except ValueError as exc:
+            reasons.append(f"{base.split('//')[-1]}：{exc}")
+
+    raise ValueError("Reddit 抓不到这个帖子。" + "；".join(reasons))
+
+
 def load_url(url: str) -> Document:
     """网页/社交帖 → Document。X 帖走镜像 API（免登录），普通网页抠正文。"""
     import urllib.request
@@ -1077,6 +1366,12 @@ def load_url(url: str) -> Document:
     from .arxiv import is_arxiv, load_arxiv
     if is_arxiv(url):
         return load_arxiv(url)
+
+    # V2EX / Reddit：都走公开接口，免登录
+    if is_v2ex(url):
+        return load_v2ex(url)
+    if is_reddit(url):
+        return load_reddit(url)
 
     def _get(u: str) -> str:
         req = urllib.request.Request(
