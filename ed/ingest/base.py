@@ -1388,15 +1388,25 @@ def load_url(url: str) -> Document:
 
     m = re.search(r"(?:x\.com|twitter\.com)/(\w+)/status/(\d+)", url)
     if m:
-        # X/Twitter：fxtwitter 公共镜像 API，免登录拿正文+图片+元数据
+        # X/Twitter：fxtwitter / vxtwitter 公共镜像 API，免登录拿正文+图片+元数据
         try:
             d = json.loads(_get(f"https://api.fxtwitter.com/{m.group(1)}/status/{m.group(2)}"))
             t = d.get("tweet") or {}
         except Exception:
-            d = json.loads(_get(f"https://cdn.syndication.twimg.com/tweet-result?id={m.group(2)}&token=x"))
-            t = {"text": d.get("text", ""),
-                 "author": {"name": d.get("user", {}).get("name", "")},
-                 "created_at": d.get("created_at", "")}
+            try:
+                d = json.loads(_get(f"https://api.vxtwitter.com/{m.group(1)}/status/{m.group(2)}"))
+                # vxtwitter 返回扁平结构，归一化成 fxtwitter 的 tweet 结构
+                t = {"text": d.get("text", ""),
+                     "author": {"name": d.get("user_name", "")},
+                     "created_at": d.get("date", ""),
+                     "media": {"all": [{"type": "photo", "url": mi["url"]}
+                                       for mi in d.get("media_extended") or []
+                                       if mi.get("type") == "image" and mi.get("url")]}}
+            except Exception:
+                d = json.loads(_get(f"https://cdn.syndication.twimg.com/tweet-result?id={m.group(2)}&token=x"))
+                t = {"text": d.get("text", ""),
+                     "author": {"name": d.get("user", {}).get("name", "")},
+                     "created_at": d.get("created_at", "")}
         author = (t.get("author") or {}).get("name", "")
         parts = [t.get("text", "").strip()]
         # 帖子里的图片也列出来（URL 级别，视觉信息按需再说）
