@@ -77,7 +77,7 @@ python3 -m ed run 书.epub --runner openai --base-url https://api.deepseek.com/v
 | 视频 | 抖音 | 官方游客 ttwid 接口 + 分享页直链解析（免登录） |
 | 视频/图文 | 小红书 | 页面 `__INITIAL_STATE__` 解析；视频转逐字稿，图文的标题/正文/标签直接进蒸馏（纯图片无文字时明确报错） |
 | 播客 | 小宇宙 / 喜马拉雅 | 公开接口直取音频（付费内容诚实报付费墙） |
-| 社交帖 | X/Twitter | fxtwitter 公共镜像 API（免登录） |
+| 社交帖 | X/Twitter | fxtwitter / vxtwitter 公共镜像 API（免登录） |
 | 社交帖 | 微博 | 官方游客 cookie 自动领取 + 移动端 JSON 接口 |
 | 论文 | arXiv（链接或 ID） | 官方 HTML 全文 + 导出 API 元数据，保留章节层级、公式与表格 |
 | 网页 | 任意博客/文章 | HTML 抓取 + 正文区域提取（按文本密度打分，去导航/页脚/侧栏） |
@@ -455,7 +455,7 @@ Every cloud dependency has a free tier, and every link has fallback layers. For 
 | Video | Douyin (TikTok CN) | Official guest ttwid + share-page direct link, no login |
 | Video/Post | Xiaohongshu | `__INITIAL_STATE__` parsing; videos become transcripts, image-note title/body/tags go straight into distillation (pure-image notes fail explicitly) |
 | Podcast | Xiaoyuzhou / Ximalaya | Public API, honest paywall errors |
-| Social post | X/Twitter | fxtwitter public mirror API, no login |
+| Social post | X/Twitter | fxtwitter / vxtwitter public mirror APIs, no login |
 | Social post | Weibo | Auto-fetched guest cookie + mobile JSON API |
 | Paper | arXiv (link or ID) | Official HTML full text + export-API metadata, keeps section structure, formulas, and tables |
 | Web page | Any blog/article | HTML fetch + main-content extraction (text-density scoring, drops nav/footer/sidebar) |
